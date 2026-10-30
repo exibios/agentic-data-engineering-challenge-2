@@ -1,76 +1,138 @@
-import uuid
+# pipeline/main.py
 from datetime import datetime, timezone
+import os
+import uuid
 from fastapi import FastAPI, HTTPException
+from google.cloud import bigquery
+from agent.memory import SessionMemory
 from pipeline.schemas import (
+    ChunkHit,
     IngestRequest,
     IngestResponse,
-    DocumentMetadataResponse,
-    SemanticSearchRequest,
-    SemanticSearchResponse,
-    ChunkResult
+    MetadataResponse,
+    SearchRequest,
+    SearchResponse,
+)
+
+# === Environment Configuration ===
+PROJECT_ID = os.getenv("GCP_PROJECT", "data4ai-challenge-03")
+DATASET_ID = os.getenv("BQ_DATASET", "clinical_trials_2")
+BUCKET_NAME = os.getenv(
+    "GCS_BUCKET", "data4ai-challenge-03-agentic-data-engineering-raw-docs-2"
 )
 
 app = FastAPI(
-    title="Autonomous Agentic Data Pipeline API",
-    description="Ingestion, Metadata Extraction, and BigQuery Vector RAG API",
-    version="1.0.0"
+    title="Clinical Trials Agentic Data Pipeline API",
+    description="Day 6 & Day 7: Ingestion, Metadata, and BigQuery Vector Search RAG API",
+    version="1.0.0",
 )
 
-BUCKET_NAME = "data4ai-challenge-03-agentic-data-engineering-raw-docs-2"
+bq_client = bigquery.Client(project=PROJECT_ID)
+memory = SessionMemory()
 
-@app.post("/v1/ingest", response_model=IngestResponse, status_code=202, tags=["Ingestion"])
-async def ingest_document(payload: IngestRequest):
-    """
-    Stages a document in GCS to trigger asynchronous Eventarc/Pub/Sub extraction
-    and Governance Agent validation.
-    """
-    last_two = payload.nct_id[-2:]
-    cdn_url = payload.source_url or f"https://cdn.clinicaltrials.gov/large-docs/{last_two}/{payload.nct_id}/{payload.filename}"
-    gcs_uri = f"gs://{BUCKET_NAME}/raw/{payload.nct_id}/{payload.filename}"
 
-    # Note: Wire up httpx download + GCS blob upload here
-    return IngestResponse(
-        ingestion_id=str(uuid.uuid4()),
-        nct_id=payload.nct_id,
-        gcs_uri=gcs_uri,
-        status="QUEUED_ASYNC_EXTRACTION",
-        timestamp=datetime.now(timezone.utc)
-    )
+@app.post("/v1/ingest", response_model=IngestResponse, status_code=202)
+async def ingest_document(req: IngestRequest):
+  """Registers a document upload target in GCS for async Eventarc/PubSub ingestion."""
+  gcs_uri = f"gs://{BUCKET_NAME}/raw/{req.nct_id}/{req.filename}"
+  return IngestResponse(
+      ingestion_id=str(uuid.uuid4()),
+      nct_id=req.nct_id,
+      gcs_uri=gcs_uri,
+      status="QUEUED_ASYNC_EXTRACTION",
+      timestamp=datetime.now(timezone.utc),
+  )
 
-@app.get("/v1/metadata/{id}", response_model=DocumentMetadataResponse, tags=["Metadata"])
-async def get_document_metadata(id: str):
-    """
-    Fetches structured trial metadata and BigQuery Object Table extraction state by NCTId.
-    """
-    if not id.startswith("NCT"):
-        raise HTTPException(status_code=400, detail="ID must be a valid NCTId (e.g., NCT04001234)")
 
-    # Note: Query BigQuery `studies_metadata` JOIN `extracted_doc_chunks` on nct_id
-    return DocumentMetadataResponse(
-        nct_id=id,
-        brief_title="Sample Clinical Trial Protocol",
-        overall_status="RECRUITING",
-        gcs_uri=f"gs://{BUCKET_NAME}/raw/{id}/protocol.pdf",
-        file_size_bytes=452190,
-        extracted_summary={"phase": "Phase 2", "primary_endpoint": "Overall Response Rate"},
-        governance_status="VERIFIED",
-        updated_at=datetime.now(timezone.utc)
-    )
+@app.get("/v1/metadata/{id}", response_model=MetadataResponse)
+async def get_metadata(id: str):
+  """Retrieves trial metadata and count of extracted chunks from BigQuery."""
+  sql = f"""
+      SELECT
+        m.nct_id,
+        ANY_VALUE(m.brief_title) AS brief_title,
+        ANY_VALUE(m.overall_status) AS overall_status,
+        ANY_VALUE(m.gcs_uri) AS gcs_uri,
+        COUNT(c.chunk_id) AS chunks_count
+      FROM `{PROJECT_ID}.{DATASET_ID}.studies_metadata` m
+      LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.extracted_doc_chunks` c
+        ON m.nct_id = c.nct_id AND m.gcs_uri = c.gcs_uri
+      WHERE m.nct_id = @nct_id
+      GROUP BY m.nct_id
+  """
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[bigquery.ScalarQueryParameter("nct_id", "STRING", id)]
+  )
+  rows = list(bq_client.query(sql, job_config=job_config).result())
+  if not rows:
+    raise HTTPException(status_code=404, detail=f"NCTId {id} not found")
 
-@app.post("/search", response_model=SemanticSearchResponse, tags=["Vector Search"])
-async def semantic_search(request: SemanticSearchRequest):
-    """
-    Executes semantic search over BigQuery Vector Index and returns chunks with cosine similarity.
-    """
-    # Note: On Day 7, replace stub query with BigQuery VECTOR_SEARCH() SQL call
-    return SemanticSearchResponse(
-        query=request.query,
-        results=[
-            ChunkResult(
-                nct_id="NCT04001234",
-                gcs_uri=f"gs://{BUCKET_NAME}/raw/NCT04001234/protocol.pdf",
-                chunk_text="Inclusion Criteria: Patients aged 18-75 with confirmed diagnosis...",
-                cosine_similarity=0.892
-            )
-        ]
-    )
+  r = rows[0]
+  return MetadataResponse(
+      nct_id=r["nct_id"],
+      brief_title=r["brief_title"],
+      overall_status=r["overall_status"],
+      gcs_uri=r["gcs_uri"],
+      extracted_sections_count=r["chunks_count"],
+  )
+
+
+@app.post("/search", response_model=SearchResponse)
+async def semantic_search(req: SearchRequest):
+  """Embeds the query with gemini-embedding-001 and runs VECTOR_SEARCH in BigQuery."""
+  sql = f"""
+      WITH query_vec AS (
+        SELECT ml_generate_embedding_result AS q_embedding
+        FROM ML.GENERATE_EMBEDDING(
+          MODEL `{PROJECT_ID}.{DATASET_ID}.embedding_model`,
+          (SELECT @query_text AS content),
+          STRUCT(TRUE AS flatten_json_output)
+        )
+      )
+      SELECT
+        base.nct_id,
+        base.section_type,
+        base.gcs_uri,
+        base.chunk_text,
+        ROUND(1.0 - distance, 4) AS cosine_similarity
+      FROM
+        VECTOR_SEARCH(
+          TABLE `{PROJECT_ID}.{DATASET_ID}.embedded_doc_chunks`,
+          'text_embedding',
+          TABLE query_vec,
+          top_k => @top_k,
+          distance_type => 'COSINE'
+        )
+      ORDER BY cosine_similarity DESC
+  """
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("query_text", "STRING", req.query),
+          bigquery.ScalarQueryParameter("top_k", "INT64", req.top_k),
+      ]
+  )
+
+  try:
+    rows = list(bq_client.query(sql, job_config=job_config).result())
+  except Exception as e:
+    raise HTTPException(status_code=500, detail=f"BigQuery error: {str(e)}")
+
+  hits = [
+      ChunkHit(
+          nct_id=row["nct_id"],
+          section_type=row["section_type"],
+          gcs_uri=row["gcs_uri"],
+          chunk_text=row["chunk_text"],
+          cosine_similarity=float(row["cosine_similarity"]),
+      )
+      for row in rows
+  ]
+
+  # Persist conversational context in Firestore if session_id is provided
+  if req.session_id:
+    try:
+      memory.add_turn(req.session_id, "user", req.query)
+    except Exception:
+      pass  # Non-blocking if Firestore is not yet enabled locally
+
+  return SearchResponse(query=req.query, results=hits)

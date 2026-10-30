@@ -1,44 +1,47 @@
-from pydantic import BaseModel, Field, HttpUrl
-from typing import Optional, List, Dict, Any
+# pipeline/schemas.py
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
+
 
 class IngestRequest(BaseModel):
-    nct_id: str = Field(..., pattern=r"^NCT\d{8}$", examples=["NCT04001234"])
-    doc_type: str = Field(..., description="Protocol, SAP, or ICF", examples=["Protocol"])
-    filename: str = Field(..., examples=["protocol.pdf"])
-    source_url: Optional[HttpUrl] = Field(
-        None, examples=["https://cdn.clinicaltrials.gov/large-docs/34/NCT04001234/protocol.pdf"]
-    )
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+  nct_id: str = Field(..., examples=["NCT04001234"])
+  filename: str = Field(..., examples=["Prot_000.pdf"])
+  doc_type: str = Field(default="Protocol", examples=["Protocol"])
+
 
 class IngestResponse(BaseModel):
-    ingestion_id: str
-    nct_id: str
-    gcs_uri: str
-    status: str = Field(..., examples=["QUEUED_ASYNC_EXTRACTION"])
-    timestamp: datetime
+  ingestion_id: str
+  nct_id: str
+  gcs_uri: str
+  status: str
+  timestamp: datetime
 
-class DocumentMetadataResponse(BaseModel):
-    nct_id: str
-    brief_title: Optional[str] = None
-    overall_status: Optional[str] = None
-    gcs_uri: str
-    content_type: str = "application/pdf"
-    file_size_bytes: Optional[int] = None
-    extracted_summary: Optional[Dict[str, Any]] = None
-    governance_status: str = "VERIFIED"
-    updated_at: datetime
 
-class SemanticSearchRequest(BaseModel):
-    query: str = Field(..., examples=["What are the inclusion criteria for phase 2 trials?"])
-    top_k: int = Field(default=5, ge=1, le=20)
+class MetadataResponse(BaseModel):
+  nct_id: str
+  brief_title: Optional[str] = None
+  overall_status: Optional[str] = None
+  gcs_uri: Optional[str] = None
+  extracted_sections_count: int = 0
 
-class ChunkResult(BaseModel):
-    nct_id: str
-    gcs_uri: str
-    chunk_text: str
-    cosine_similarity: float
 
-class SemanticSearchResponse(BaseModel):
-    query: str
-    results: List[ChunkResult]
+class SearchRequest(BaseModel):
+  query: str = Field(
+      ..., examples=["What are the inclusion criteria and dosing schedule?"]
+  )
+  top_k: int = Field(default=5, ge=1, le=20)
+  session_id: Optional[str] = Field(default="demo-session-01")
+
+
+class ChunkHit(BaseModel):
+  nct_id: str
+  section_type: str
+  gcs_uri: str
+  chunk_text: str
+  cosine_similarity: float
+
+
+class SearchResponse(BaseModel):
+  query: str
+  results: List[ChunkHit]
