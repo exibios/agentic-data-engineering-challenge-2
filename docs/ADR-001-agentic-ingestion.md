@@ -1,8 +1,5 @@
 # ADR-001: Chunking Strategy, Model Selection, Schema Evolution, and SDP Governance
 
-- **Status:** Accepted
-- **Project:** `data4ai-challenge-03` (`clinical_trials_2`)
-
 ## 1. Chunking Strategy: Prompt-Driven Semantic Section Chunking
 - **Decision:** Use `gemini-3.8-flash` via BigQuery `ML.GENERATE_TEXT` to segment each PDF into logical clinical sections (`Study Overview`, `Inclusion Criteria`, `Exclusion Criteria`, `Primary Endpoints`, `Dosing & Intervention`) and unnest them into individual rows with `section_type` and `chunk_text`. Prepend `NCTId` and `section_type` to `chunk_text` prior to embedding with `gemini-embedding-001`.
 - **Rationale:** Naive character splitting breaks clinical tables and eligibility bullet lists across chunks. Section-aligned chunks preserve clinical semantics and maximize cosine similarity accuracy during `VECTOR_SEARCH`.

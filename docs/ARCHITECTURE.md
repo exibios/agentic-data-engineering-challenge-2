@@ -43,6 +43,7 @@ flowchart LR
     FASTAPI <--> FS
     ADK <--> FASTAPI
     ADK <--> META
+```
 
 2. Unstructured-to-Structured Flow
 GCS & Object Table: Raw PDFs land in gs://data4ai-challenge-03-agentic-data-engineering-raw-docs-2/raw/. The BigQuery Object Table (raw_documents_object_table) catalogs these files via the data4ai-challenge-03.us.agentic_conn connection.
