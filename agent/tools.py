@@ -5,6 +5,12 @@ from typing import Any, Dict, List
 from google.cloud import bigquery
 import httpx
 
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except ImportError:
+  pass
+
 # Configure visible console logging for Day 8 Acceptance Criteria
 logging.basicConfig(
     level=logging.INFO,
@@ -12,9 +18,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("day8_adk_tools")
 
-PROJECT_ID = os.getenv("GCP_PROJECT", "data4ai-challenge-03")
-DATASET_ID = os.getenv("BQ_DATASET", "clinical_trials_2")
-RAG_API_URL = os.getenv("RAG_API_URL", "http://localhost:8080/search")
+PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
+DATASET_ID = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
+TABLE_ID = os.getenv("TABLE_ID") or os.getenv("BQ_TABLE") or "dummy_table_id"
+RAG_API_URL = os.getenv("RAG_API_URL", "http://dummy-rag-api-url/search")
+FULL_TABLE_ID = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 bq_client = bigquery.Client(project=PROJECT_ID)
 
@@ -26,7 +34,7 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
   aggregations, group-bys, trial statuses, or filtering by NCTId.
 
   Target Table Schema:
-  `data4ai-challenge-03.clinical_trials_2.studies_metadata`
+  `studies_metadata` (query `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`):
     - nct_id (STRING): Unique clinical trial ID (e.g., 'NCT04001234')
     - brief_title (STRING): Title of the study
     - overall_status (STRING): Trial status (e.g., 'COMPLETED', 'RECRUITING')
@@ -36,7 +44,7 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
 
   Args:
       sql_query: A valid BigQuery Standard SQL SELECT statement querying
-        `data4ai-challenge-03.clinical_trials_2.studies_metadata`.
+        the fully-qualified studies metadata table.
 
   Returns:
       A dictionary containing the executed SQL and returned rows.

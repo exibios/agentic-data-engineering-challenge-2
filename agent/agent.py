@@ -3,21 +3,30 @@ import os
 from google.adk.agents import Agent
 from agent.tools import execute_clinical_sql, search_clinical_protocols
 
-PROJECT_ID = os.getenv("GCP_PROJECT", "data4ai-challenge-03")
-LOCATION = os.getenv("GCP_LOCATION", "global")
-MODEL_NAME = os.getenv("AGENT_MODEL", "gemini-3.8-flash")
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except ImportError:
+  pass
+
+PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
+LOCATION = os.getenv("LOCATION") or os.getenv("GCP_LOCATION") or "dummy-location"
+MODEL_NAME = os.getenv("MODEL_NAME") or os.getenv("AGENT_MODEL") or "dummy-model-name"
+DATASET_ID = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
+TABLE_ID = os.getenv("TABLE_ID") or os.getenv("BQ_TABLE") or "dummy_table_id"
+GOOGLE_GENAI_USE_VERTEXAI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "dummy-vertexai-flag")
 
 # Ensure ADK uses Vertex AI backend in your GCP project
-os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
-os.environ.setdefault("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
-os.environ.setdefault("GOOGLE_CLOUD_LOCATION", LOCATION)
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = GOOGLE_GENAI_USE_VERTEXAI
+os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
 
-SYSTEM_INSTRUCTION = """You are an autonomous Clinical Trials Data Agent for project `data4ai-challenge-03`.
+SYSTEM_INSTRUCTION = f"""You are an autonomous Clinical Trials Data Agent for project `{PROJECT_ID}`.
 You have access to two specialized tools. Route every user question dynamically based on intent:
 
 1. ANALYTICAL / STRUCTURED INTENT -> Call `execute_clinical_sql`:
    - Use for counts, aggregations, filtering by `overall_status`, listing trials, or looking up specific `nct_id` metadata.
-   - Always query the fully qualified table: `data4ai-challenge-03.clinical_trials_2.studies_metadata`.
+   - Always query the fully qualified table: `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`.
    - Never invent column names; use only: `nct_id`, `brief_title`, `overall_status`, `doc_filename`, `cdn_url`, `gcs_uri`.
 
 2. SEMANTIC / CONCEPTUAL INTENT -> Call `search_clinical_protocols`:

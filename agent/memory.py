@@ -4,7 +4,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 from google.cloud import firestore
 
-PROJECT_ID = os.getenv("GCP_PROJECT", "data4ai-challenge-03")
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except ImportError:
+  pass
+
+PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
+COLLECTION_NAME = os.getenv("FIRESTORE_COLLECTION", "dummy-agent-sessions")
 
 
 class SessionMemory:
@@ -12,7 +19,7 @@ class SessionMemory:
 
   def __init__(self):
     self.db = firestore.Client(project=PROJECT_ID)
-    self.collection = self.db.collection("agent_sessions")
+    self.collection = self.db.collection(COLLECTION_NAME)
 
   def add_turn(self, session_id: str, role: str, message: str) -> None:
     doc_ref = self.collection.document(session_id)

@@ -1,13 +1,24 @@
-# scripts/fetch_sample_data.py
+import os
 import httpx
 from google.cloud import bigquery, storage
 
-# === Project Constants ===
-PROJECT_ID = "data4ai-challenge-03"
-DATASET_ID = "clinical_trials_2"
-TABLE_ID = "studies_metadata"
-BUCKET_NAME = "data4ai-challenge-03-agentic-data-engineering-raw-docs-2"
-MAX_PDFS = 20  # Respects the 50-100 document budget
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except ImportError:
+  pass
+
+# === Project Constants from Environment with Dummy Defaults ===
+PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
+DATASET_ID = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
+TABLE_ID = os.getenv("TABLE_ID") or os.getenv("BQ_TABLE") or "dummy_table_id"
+BUCKET_NAME = (
+    os.getenv("BUCKET_NAME")
+    or os.getenv("GCS_BUCKET")
+    or "dummy-bucket-name"
+)
+MAX_PDFS = int(os.getenv("MAX_PDFS", "20"))  # Respects the 50-100 document budget
+
 
 API_URL = "https://clinicaltrials.gov/api/v2/studies"
 QUERY_PARAMS = {

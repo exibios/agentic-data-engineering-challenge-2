@@ -1,15 +1,23 @@
 # scripts/test_day8_agent.py
 import asyncio
+import os
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except ImportError:
+  pass
+
 from agent.agent import root_agent
-#from agent.agent import root_agent
 from agent.memory import SessionMemory
 
-APP_NAME = "clinical_trials_app"
-USER_ID = "challenge_engineer"
-SESSION_ID = "day8-verification-session"
+APP_NAME = os.getenv("APP_NAME", "clinical_trials_app")
+USER_ID = os.getenv("USER_ID", "challenge_engineer")
+SESSION_ID = os.getenv("SESSION_ID", "day8-verification-session")
+
 
 
 async def ask_agent(runner: Runner, memory: SessionMemory, prompt: str) -> None:
