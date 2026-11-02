@@ -48,15 +48,37 @@ gcloud logging metrics create governance_dlq_routed_count \
   --log-filter='textPayload:"[GOVERNANCE AGENT INTERCEPTED -> DLQ]"' \
   --project="${PROJECT_ID}" || true
 
+
+gcloud beta services identity create \
+  --service=storage.googleapis.com \
+  --project=data4ai-challenge-03
+
+
 echo "=== 4. Creating Eventarc Trigger on GCS Bucket (Object Finalized) ==="
 # Note: Run this after deploying `clinical-trials-rag-api` to Cloud Run
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
 GCS_SA=$(gsutil kms serviceaccount -p "${PROJECT_ID}")
 
+'''
+V1
 # Grant GCS service account permission to publish to Pub/Sub for Eventarc
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${GCS_SA}" \
   --role="roles/pubsub.publisher" >/dev/null
+'''
+PROJECT_ID="data4ai-challenge-03"
+GCS_SA="service-80080086039@gs-project-accounts.iam.gserviceaccount.com"
+
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${GCS_SA}" \
+  --role="roles/pubsub.publisher"
+
+
+PROJECT_ID="data4ai-challenge-03"
+REGION="us-central1"
+BUCKET_NAME="data4ai-challenge-03-agentic-data-engineering-raw-docs-2"
+SERVICE_NAME="clinical-trials-rag-api"
+COMPUTE_SA="80080086039-compute@developer.gserviceaccount.com"
 
 gcloud eventarc triggers create clinical-trials-gcs-trigger \
   --location="us" \
@@ -65,7 +87,7 @@ gcloud eventarc triggers create clinical-trials-gcs-trigger \
   --destination-run-path="/v1/events/gcs-ingest" \
   --event-filters="type=google.cloud.storage.object.v1.finalized" \
   --event-filters="bucket=${BUCKET_NAME}" \
-  --service-account="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-  --project="${PROJECT_ID}" || true
+  --service-account="${COMPUTE_SA}" \
+  --project="${PROJECT_ID}"
 
 echo "✅ Day 9 Eventarc, Pub/Sub DLQ, and Log-Based Metric configured!"
