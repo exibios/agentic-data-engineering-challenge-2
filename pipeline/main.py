@@ -13,9 +13,14 @@ from pipeline.schemas import (
     SearchRequest,
     SearchResponse,
 )
+
 import re
 from fastapi import Request, Response
 from agent.governance_agent import verify_ingestion_payload_a2a
+
+import time
+from agent.guardrails import redact_pii_dlp
+from agent.telemetry import log_agent_session_metrics, tracer
 
 try:
   from dotenv import load_dotenv
@@ -93,63 +98,81 @@ async def get_metadata(id: str):
 
 @app.post("/search", response_model=SearchResponse)
 async def semantic_search(req: SearchRequest):
-  """Embeds the query with gemini-embedding-001 and runs VECTOR_SEARCH in BigQuery."""
-  sql = f"""
-      WITH query_vec AS (
-        SELECT ml_generate_embedding_result AS q_embedding
-        FROM ML.GENERATE_EMBEDDING(
-          MODEL `{PROJECT_ID}.{DATASET_ID}.{EMBEDDING_MODEL}`,
-          (SELECT @query_text AS content),
-          STRUCT(TRUE AS flatten_json_output)
-        )
-      )
-      SELECT
-        base.nct_id,
-        base.section_type,
-        base.gcs_uri,
-        base.chunk_text,
-        ROUND(1.0 - distance, 4) AS cosine_similarity
-      FROM
-        VECTOR_SEARCH(
-          TABLE `{PROJECT_ID}.{DATASET_ID}.embedded_doc_chunks`,
-          'text_embedding',
-          TABLE query_vec,
-          top_k => @top_k,
-          distance_type => 'COSINE'
-        )
-      ORDER BY cosine_similarity DESC
-  """
-  job_config = bigquery.QueryJobConfig(
-      query_parameters=[
-          bigquery.ScalarQueryParameter("query_text", "STRING", req.query),
-          bigquery.ScalarQueryParameter("top_k", "INT64", req.top_k),
-      ]
-  )
+  start_time = time.time()
+  session_id = req.session_id or "default-session"
 
-  try:
+  with tracer.start_as_current_span("semantic_vector_search") as span:
+    # 1. Cloud DLP Guardrail Check
+    sanitized_query, pii_detected = redact_pii_dlp(req.query)
+    span.set_attribute("pii_detected", pii_detected)
+
+    # 2. BigQuery Vector Search
+    sql = f"""
+            WITH query_vec AS (
+                SELECT ml_generate_embedding_result AS q_embedding
+                FROM ML.GENERATE_EMBEDDING(
+                    MODEL `{PROJECT_ID}.{DATASET_ID}.embedding_model`,
+                    (SELECT @query_text AS content),
+                    STRUCT(TRUE AS flatten_json_output)
+                )
+            )
+            SELECT
+                base.nct_id,
+                base.section_type,
+                base.gcs_uri,
+                base.chunk_text,
+                ROUND(1.0 - distance, 4) AS cosine_similarity
+            FROM
+                VECTOR_SEARCH(
+                    TABLE `{PROJECT_ID}.{DATASET_ID}.embedded_doc_chunks`,
+                    'text_embedding',
+                    TABLE query_vec,
+                    top_k => @top_k,
+                    distance_type => 'COSINE'
+                )
+            ORDER BY cosine_similarity DESC
+        """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(
+                "query_text", "STRING", sanitized_query
+            ),
+            bigquery.ScalarQueryParameter("top_k", "INT64", req.top_k),
+        ]
+    )
+
     rows = list(bq_client.query(sql, job_config=job_config).result())
-  except Exception as e:
-    raise HTTPException(status_code=500, detail=f"BigQuery error: {str(e)}")
+    hits = [
+        ChunkHit(
+            nct_id=r["nct_id"],
+            section_type=r["section_type"],
+            gcs_uri=r["gcs_uri"],
+            chunk_text=r["chunk_text"],
+            cosine_similarity=float(r["cosine_similarity"]),
+        )
+        for r in rows
+    ]
 
-  hits = [
-      ChunkHit(
-          nct_id=row["nct_id"],
-          section_type=row["section_type"],
-          gcs_uri=row["gcs_uri"],
-          chunk_text=row["chunk_text"],
-          cosine_similarity=float(row["cosine_similarity"]),
-      )
-      for row in rows
-  ]
+    # 3. Calculate latency and tokens for FinOps tracking
+    latency_ms = (time.time() - start_time) * 1000.0
+    approx_prompt_tokens = len(sanitized_query.split()) * 2
+    approx_response_tokens = sum(len(h.chunk_text.split()) for h in hits)
 
-  # Persist conversational context in Firestore if session_id is provided
-  if req.session_id:
-    try:
-      memory.add_turn(req.session_id, "user", req.query)
-    except Exception:
-      pass  # Non-blocking if Firestore is not yet enabled locally
+    span.set_attribute("latency_ms", latency_ms)
+    span.set_attribute("total_hits", len(hits))
 
-  return SearchResponse(query=req.query, results=hits)
+    # Structured Cloud Logging for Dashboard
+    log_agent_session_metrics(
+        session_id=session_id,
+        user_prompt=sanitized_query,
+        tool_selected="search_clinical_protocols",
+        latency_ms=latency_ms,
+        prompt_tokens=approx_prompt_tokens,
+        response_tokens=approx_response_tokens,
+        pii_intercepted=pii_detected,
+    )
+
+    return SearchResponse(query=sanitized_query, results=hits)
 
 
 
