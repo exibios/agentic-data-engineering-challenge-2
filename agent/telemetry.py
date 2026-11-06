@@ -1,11 +1,9 @@
 # agent/telemetry.py
-"""OpenTelemetry tracing and structured Cloud Logging for FinOps / Token costs."""
+"""OpenTelemetry tracing and direct Cloud Logging for FinOps / Token costs."""
 
-import json
-import logging
 import os
-import time
 from typing import Any, Dict
+from google.cloud import logging as gcp_logging
 from opentelemetry import trace
 from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 from opentelemetry.sdk.trace import TracerProvider
@@ -13,17 +11,25 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 PROJECT_ID = os.getenv("GCP_PROJECT", "data4ai-challenge-03")
 
-# Initialize OpenTelemetry with Google Cloud Trace Exporter
+# 1. Initialize OpenTelemetry Tracer
 tracer_provider = TracerProvider()
 try:
   cloud_trace_exporter = CloudTraceSpanExporter(project_id=PROJECT_ID)
   tracer_provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
   trace.set_tracer_provider(tracer_provider)
 except Exception:
-  pass  # Fallback to default in-memory tracer if offline
+  pass
 
 tracer = trace.get_tracer("clinical_trials_agent")
-logger = logging.getLogger("agent_telemetry")
+
+# 2. Initialize Direct Cloud Logging Client
+# This writes directly to GCP Cloud Logging via the API (works from localhost and Cloud Run)
+try:
+  logging_client = gcp_logging.Client(project=PROJECT_ID)
+  gcp_logger = logging_client.logger("agent_telemetry_log")
+except Exception as e:
+  gcp_logger = None
+  print(f"⚠️ Cloud Logging client initialization warning: {e}")
 
 
 def log_agent_session_metrics(
@@ -35,10 +41,13 @@ def log_agent_session_metrics(
     response_tokens: int,
     pii_intercepted: bool = False,
 ) -> None:
-  """Emits a structured JSON log that Cloud Logging metrics parse for dashboard aggregation."""
+  """Writes structured JSON directly to Cloud Logging (jsonPayload)
+
+  for the Day 10 token and latency metrics.
+  """
   total_tokens = prompt_tokens + response_tokens
 
-  # FinOps cost estimation for gemini-3.8-flash ($0.075 / 1M input, $0.30 / 1M output)
+  # FinOps cost estimation for gemini-3.8-flash ($0.075 / 1M in, $0.30 / 1M out)
   estimated_cost_usd = (prompt_tokens * 0.000000075) + (
       response_tokens * 0.00000030
   )
@@ -46,6 +55,7 @@ def log_agent_session_metrics(
   structured_payload: Dict[str, Any] = {
       "event_type": "agent_execution_telemetry",
       "session_id": session_id,
+      "user_prompt": user_prompt,
       "tool_selected": tool_selected,
       "latency_ms": round(latency_ms, 2),
       "prompt_tokens": prompt_tokens,
@@ -55,5 +65,12 @@ def log_agent_session_metrics(
       "pii_intercepted": pii_intercepted,
   }
 
-  # Print structured JSON directly to stdout for Cloud Logging ingestion
-  print(json.dumps(structured_payload))
+  # Direct write to GCP Cloud Logging as a structured JSON payload
+  if gcp_logger:
+    try:
+      gcp_logger.log_struct(structured_payload, severity="INFO")
+    except Exception as e:
+      print(f"Failed to send log to GCP Cloud Logging: {e}")
+
+  # Also flush to stdout for local terminal visibility
+  print(f"📡 [TELEMETRY EMITTED]: {structured_payload}", flush=True)

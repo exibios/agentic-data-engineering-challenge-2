@@ -16,15 +16,18 @@ import urllib.error
 import urllib.request
 
 CLINICAL_PROMPTS = [
+    "Dosing schedule and administration regimen for Patient John Doe, SSN: 123-45-6789, phone 555-0199.",
     "What are the inclusion criteria for adult oncology patients?",
     "What are the primary endpoints and overall response rates?",
     "List common exclusion criteria for patients with prior cardiac history.",
-    "What is the dosing schedule and administration regimen?",
+    "What is the dosing schedule and administration regimen for John Doe?",
+    "What are the details of clinical trial NCT07370753?",
     "What adverse events or toxicity thresholds are documented in phase 2?",
+
 ]
 
 
-def send_request(target_url: str, vu_id: int) -> dict:
+def send_request(target_url: str, vu_id: int, token: str = None) -> dict:
   """Sends a single HTTP POST request to /search and measures latency."""
   query = random.choice(CLINICAL_PROMPTS)
   payload = json.dumps({
@@ -33,13 +36,17 @@ def send_request(target_url: str, vu_id: int) -> dict:
       "session_id": f"native-vu-session-{vu_id}",
   }).encode("utf-8")
 
+  headers = {
+      "Content-Type": "application/json",
+      "User-Agent": "native-python-load-tester/1.0",
+  }
+  if token:
+      headers["Authorization"] = f"Bearer {token}"
+
   req = urllib.request.Request(
       url=target_url,
       data=payload,
-      headers={
-          "Content-Type": "application/json",
-          "User-Agent": "native-python-load-tester/1.0",
-      },
+      headers=headers,
       method="POST",
   )
 
@@ -86,7 +93,7 @@ def compute_percentile(sorted_list: list, percentile: float) -> float:
 
 
 def run_load_test(
-    target_url: str, total_requests: int, concurrency: int
+    target_url: str, total_requests: int, concurrency: int, token: str = None
 ) -> None:
   print("=" * 65)
   print("🚀 Starting Zero-Dependency Concurrent Load Test")
@@ -104,7 +111,7 @@ def run_load_test(
 
   with ThreadPoolExecutor(max_workers=concurrency) as executor:
     futures = [
-        executor.submit(send_request, target_url, i % concurrency)
+        executor.submit(send_request, target_url, i % concurrency, token)
         for i in range(total_requests)
     ]
     for future in as_completed(futures):
@@ -169,19 +176,29 @@ if __name__ == "__main__":
       help="Target base URL or /search URL",
   )
   parser.add_argument(
-      "-n",
-      "--requests",
-      type=int,
-      default=50,
-      help="Total number of requests (default: 50)",
+      "-n", "--requests", type=int, default=50, help="Total number of requests"
   )
   parser.add_argument(
-      "-c",
-      "--concurrency",
-      type=int,
-      default=5,
-      help="Number of concurrent workers (default: 5)",
+      "-c", "--concurrency", type=int, default=5, help="Number of concurrent workers"
+  )
+  parser.add_argument(
+      "--token", type=str, default=None, help="Explicit Bearer token for auth"
   )
   args = parser.parse_args()
 
-  run_load_test(args.url, args.requests, args.concurrency)
+  token = args.token
+
+  # Automatically fetch token ONLY if targeting Cloud Run (*.run.app) and no token was manually supplied
+  if not token and ("run.app" in args.url or "cloudfunctions.net" in args.url):
+      try:
+          import subprocess
+          print("🔑 Target is a cloud service. Fetching gcloud identity token automatically...")
+          token = subprocess.check_output(
+              ["gcloud", "auth", "print-identity-token"]
+          ).decode("utf-8").strip()
+      except Exception as e:
+          print(f"⚠️ Could not auto-fetch gcloud token: {e}")
+  else:
+      print("🔌 Local or unauthenticated target detected. Skipping token generation.")
+
+  run_load_test(args.url, args.requests, args.concurrency, token)
