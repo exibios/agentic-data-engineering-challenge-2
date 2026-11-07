@@ -1,16 +1,11 @@
 # agent/guardrails.py
 """Sensitive Data Protection (Cloud DLP) and Vertex AI Safety Settings."""
 
-import os
 from typing import Tuple
 from google.cloud import dlp_v2
 from google.genai import types
-
-PROJECT_ID = os.getenv("GCP_PROJECT", "data4ai-challenge-03")
-LOCATION = os.getenv("GCP_LOCATION", "global")
-
-dlp_client = dlp_v2.DlpServiceClient()
-PARENT = f"projects/{PROJECT_ID}/locations/{LOCATION}"
+from agent.clients import get_dlp_client
+from agent.config import settings
 
 # 1. Target InfoTypes for Clinical Trial Data Protection
 INFO_TYPES = [
@@ -47,11 +42,13 @@ def redact_pii_dlp(text: str) -> Tuple[str, bool]:
   }
 
   item = {"value": text}
+  parent = f"projects/{settings.PROJECT_ID}/locations/{settings.LOCATION}"
 
   try:
-    response = dlp_client.deidentify_content(
+    client = get_dlp_client()
+    response = client.deidentify_content(
         request={
-            "parent": PARENT,
+            "parent": parent,
             "deidentify_config": deidentify_config,
             "inspect_config": inspect_config,
             "item": item,
@@ -60,7 +57,7 @@ def redact_pii_dlp(text: str) -> Tuple[str, bool]:
     redacted = response.item.value
     pii_found = redacted != text
     return redacted, pii_found
-  except Exception as e:
+  except Exception:
     # Graceful fallback if DLP API is not yet provisioned locally
     return text, False
 

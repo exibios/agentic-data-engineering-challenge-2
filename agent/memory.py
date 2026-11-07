@@ -1,25 +1,22 @@
 # agent/memory.py
-import os
+"""Manages short-term conversational state in Firestore."""
+
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from google.cloud import firestore
-
-try:
-  from dotenv import load_dotenv
-  load_dotenv()
-except ImportError:
-  pass
-
-PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
-COLLECTION_NAME = os.getenv("FIRESTORE_COLLECTION", "dummy-agent-sessions")
+from agent.clients import get_firestore_client
+from agent.config import settings
 
 
 class SessionMemory:
   """Manages short-term conversational state in Firestore."""
 
   def __init__(self):
-    self.db = firestore.Client(project=PROJECT_ID)
-    self.collection = self.db.collection(COLLECTION_NAME)
+    self.collection_name = settings.FIRESTORE_COLLECTION
+
+  @property
+  def collection(self):
+    return get_firestore_client().collection(self.collection_name)
 
   def add_turn(self, session_id: str, role: str, message: str) -> None:
     doc_ref = self.collection.document(session_id)

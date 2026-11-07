@@ -1,13 +1,25 @@
 # pipeline/main.py
-from datetime import datetime, timezone
-import os
+import asyncio
 import base64
+from datetime import datetime, timezone
 import json
+import re
+import time
 import uuid
 from fastapi import FastAPI, HTTPException, Request
 from google.cloud import bigquery
-from agent.memory import SessionMemory
+from agent.clients import get_bq_client
+from agent.config import settings
 from agent.governance_agent import verify_ingestion_payload_a2a
+from agent.guardrails import redact_pii_dlp
+from agent.memory import SessionMemory
+from agent.telemetry import log_agent_session_metrics, tracer
+from pipeline.queries import (
+    build_incremental_embedding_query,
+    build_incremental_extraction_query,
+    build_metadata_query,
+    build_semantic_search_query,
+)
 from pipeline.schemas import (
     ChunkHit,
     IngestRequest,
@@ -17,43 +29,42 @@ from pipeline.schemas import (
     SearchResponse,
 )
 
-import re
-import time
-from agent.guardrails import redact_pii_dlp
-from agent.telemetry import log_agent_session_metrics, tracer
-
-try:
-  from dotenv import load_dotenv
-  load_dotenv()
-except ImportError:
-  pass
-
-# === Environment Configuration ===
-PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
-DATASET_ID = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
-BUCKET_NAME = (
-    os.getenv("BUCKET_NAME")
-    or os.getenv("GCS_BUCKET")
-    or "dummy-bucket-name"
-)
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "dummy_embedding_model")
-EXTRACTOR_MODEL = os.getenv("EXTRACTOR_MODEL", "dummy_model_extractor")
-
-
 app = FastAPI(
     title="Clinical Trials Agentic Data Pipeline API",
     description="Day 6 & Day 7: Ingestion, Metadata, and BigQuery Vector Search RAG API",
     version="1.0.0",
 )
 
-bq_client = bigquery.Client(project=PROJECT_ID)
 memory = SessionMemory()
 
 
+# === Helper Functions for Non-Blocking Database Execution ===
+def _run_query(sql_str: str, config: bigquery.QueryJobConfig) -> list:
+  """Executes a synchronous BigQuery query in a worker thread."""
+  return list(get_bq_client().query(sql_str, job_config=config).result())
+
+
+def _execute_incremental_ingest(
+    extract_sql: str, embed_sql: str, config: bigquery.QueryJobConfig
+) -> int:
+  """Executes incremental extraction and embedding queries in a worker thread."""
+  bq = get_bq_client()
+  extract_job = bq.query(extract_sql, job_config=config)
+  extract_job.result()
+  rows_extracted = extract_job.num_dml_affected_rows or 0
+
+  if rows_extracted > 0:
+    embed_job = bq.query(embed_sql, job_config=config)
+    embed_job.result()
+
+  return rows_extracted
+
+
+# === API Endpoints ===
 @app.post("/v1/ingest", response_model=IngestResponse, status_code=202)
 async def ingest_document(req: IngestRequest):
   """Registers a document upload target in GCS for async Eventarc/PubSub ingestion."""
-  gcs_uri = f"gs://{BUCKET_NAME}/raw/{req.nct_id}/{req.filename}"
+  gcs_uri = f"gs://{settings.BUCKET_NAME}/raw/{req.nct_id}/{req.filename}"
   return IngestResponse(
       ingestion_id=str(uuid.uuid4()),
       nct_id=req.nct_id,
@@ -65,24 +76,21 @@ async def ingest_document(req: IngestRequest):
 
 @app.get("/v1/metadata/{id}", response_model=MetadataResponse)
 async def get_metadata(id: str):
-  """Retrieves trial metadata and count of extracted chunks from BigQuery."""
-  sql = f"""
-      SELECT
-        m.nct_id,
-        ANY_VALUE(m.brief_title) AS brief_title,
-        ANY_VALUE(m.overall_status) AS overall_status,
-        ANY_VALUE(m.gcs_uri) AS gcs_uri,
-        COUNT(c.chunk_id) AS chunks_count
-      FROM `{PROJECT_ID}.{DATASET_ID}.studies_metadata` m
-      LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.extracted_doc_chunks` c
-        ON m.nct_id = c.nct_id AND m.gcs_uri = c.gcs_uri
-      WHERE m.nct_id = @nct_id
-      GROUP BY m.nct_id
-  """
+  """Retrieves trial metadata and count of extracted chunks from BigQuery (non-blocking)."""
+  sql = build_metadata_query(
+      project_id=settings.PROJECT_ID,
+      dataset_id=settings.DATASET_ID,
+      table_id=settings.TABLE_ID,
+  )
   job_config = bigquery.QueryJobConfig(
       query_parameters=[bigquery.ScalarQueryParameter("nct_id", "STRING", id)]
   )
-  rows = list(bq_client.query(sql, job_config=job_config).result())
+
+  try:
+    rows = await asyncio.to_thread(_run_query, sql, job_config)
+  except Exception as e:
+    raise HTTPException(status_code=500, detail=f"BigQuery error: {str(e)}")
+
   if not rows:
     raise HTTPException(status_code=404, detail=f"NCTId {id} not found")
 
@@ -98,6 +106,7 @@ async def get_metadata(id: str):
 
 @app.post("/search", response_model=SearchResponse)
 async def semantic_search(req: SearchRequest):
+  """Embeds query and executes BigQuery VECTOR_SEARCH with DLP and Telemetry (non-blocking)."""
   start_time = time.time()
   session_id = req.session_id or "default-session"
 
@@ -106,32 +115,12 @@ async def semantic_search(req: SearchRequest):
     sanitized_query, pii_detected = redact_pii_dlp(req.query)
     span.set_attribute("pii_detected", pii_detected)
 
-    # 2. BigQuery Vector Search
-    sql = f"""
-            WITH query_vec AS (
-                SELECT ml_generate_embedding_result AS q_embedding
-                FROM ML.GENERATE_EMBEDDING(
-                    MODEL `{PROJECT_ID}.{DATASET_ID}.embedding_model`,
-                    (SELECT @query_text AS content),
-                    STRUCT(TRUE AS flatten_json_output)
-                )
-            )
-            SELECT
-                base.nct_id,
-                base.section_type,
-                base.gcs_uri,
-                base.chunk_text,
-                ROUND(1.0 - distance, 4) AS cosine_similarity
-            FROM
-                VECTOR_SEARCH(
-                    TABLE `{PROJECT_ID}.{DATASET_ID}.embedded_doc_chunks`,
-                    'text_embedding',
-                    TABLE query_vec,
-                    top_k => @top_k,
-                    distance_type => 'COSINE'
-                )
-            ORDER BY cosine_similarity DESC
-        """
+    # 2. BigQuery Vector Search (Offloaded to worker thread)
+    sql = build_semantic_search_query(
+        project_id=settings.PROJECT_ID,
+        dataset_id=settings.DATASET_ID,
+        embedding_model=settings.EMBEDDING_MODEL,
+    )
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter(
@@ -141,7 +130,11 @@ async def semantic_search(req: SearchRequest):
         ]
     )
 
-    rows = list(bq_client.query(sql, job_config=job_config).result())
+    try:
+      rows = await asyncio.to_thread(_run_query, sql, job_config)
+    except Exception as e:
+      raise HTTPException(status_code=500, detail=f"BigQuery error: {str(e)}")
+
     hits = [
         ChunkHit(
             nct_id=r["nct_id"],
@@ -175,14 +168,9 @@ async def semantic_search(req: SearchRequest):
     return SearchResponse(query=sanitized_query, results=hits)
 
 
-
 @app.post("/v1/events/gcs-ingest", tags=["Eventarc A2A Ingestion"])
 async def handle_eventarc_gcs_upload(request: Request):
-  """Receives GCS Object Finalize events from Eventarc/PubSub, runs A2A Governance verification,
-
-  and executes the exact 5-section JSON extraction + UNNEST query using
-  `model_extractor` and `documents_table` for the newly uploaded `@gcs_uri`.
-  """
+  """Receives GCS Object Finalize events, runs A2A Governance, and triggers incremental BQ extraction."""
   raw_body = await request.json()
 
   # 1. Unpack Pub/Sub Push base64 envelope or Eventarc 'data' envelope if present
@@ -194,7 +182,7 @@ async def handle_eventarc_gcs_upload(request: Request):
   else:
     body = raw_body
 
-  bucket = body.get("bucket", BUCKET_NAME)
+  bucket = body.get("bucket", settings.BUCKET_NAME)
   object_name = body.get("name", "")
   size_bytes = int(body.get("size", 1024))
   sample_text = body.get("sample_text", "")
@@ -222,119 +210,18 @@ async def handle_eventarc_gcs_upload(request: Request):
         "governance_decision": decision,
     }
 
-  # 3. Step 2: Incremental Extraction into `extracted_doc_chunks`
-  # Matches your batch query 1-for-1 (using `model_extractor` and `documents_table` filtered by `uri = @gcs_uri`)
-  # Note: Double curly braces {{ }} escape Python f-string formatting inside the SQL string.
+  # 3. Step 2 & 3: Incremental Extraction and Embedding (non-blocking)
   ingest_timestamp = datetime.now(timezone.utc)
-  incremental_extract_sql = f"""
-      INSERT INTO `{PROJECT_ID}.{DATASET_ID}.extracted_doc_chunks`
-        (chunk_id, nct_id, gcs_uri, section_type, chunk_text, created_at)
-      WITH raw_llm_extraction AS (
-        SELECT
-          uri AS gcs_uri,
-          REGEXP_EXTRACT(uri, r'NCT\\d{{8}}') AS nct_id,
-          ml_generate_text_llm_result AS raw_response,
-          -- Strip markdown ```json fences if the LLM includes them, then parse safely
-          SAFE.PARSE_JSON(
-            REGEXP_REPLACE(
-              REGEXP_REPLACE(TRIM(ml_generate_text_llm_result), r'^```(?:json)?\\s*', ''),
-              r'\\s*```$', ''
-            )
-          ) AS parsed_json
-        FROM
-          ML.GENERATE_TEXT(
-            MODEL `{PROJECT_ID}.{DATASET_ID}.model_extractor`,
-            (
-              SELECT *
-              FROM `{PROJECT_ID}.{DATASET_ID}.documents_table`
-              WHERE uri = @gcs_uri AND content_type = 'application/pdf'
-            ),
-            STRUCT(
-              '''You are a clinical trial data extractor. Read this PDF and extract its key sections.
-Return ONLY a valid JSON array of objects (no markdown fences, no extra commentary) using this exact structure:
-[
-  {{"section_type": "Study Overview", "chunk_text": "Detailed summary of study title, phase, and objectives..."}},
-  {{"section_type": "Inclusion Criteria", "chunk_text": "Detailed inclusion criteria..."}},
-  {{"section_type": "Exclusion Criteria", "chunk_text": "Detailed exclusion criteria..."}},
-  {{"section_type": "Primary Endpoints", "chunk_text": "Primary and secondary outcome measures..."}},
-  {{"section_type": "Dosing & Intervention", "chunk_text": "Treatment arms, dosing schedule, and safety protocol..."}}
-]''' AS prompt,
-              0.0 AS temperature,
-              2048 AS max_output_tokens,
-              TRUE AS flatten_json_output
-            )
-          )
-      ),
-      unnested_chunks AS (
-        -- Path A: When Gemini returns the valid JSON array of sections
-        SELECT
-          nct_id,
-          gcs_uri,
-          STRING(section_obj.section_type) AS section_type,
-          STRING(section_obj.chunk_text) AS chunk_text
-        FROM
-          raw_llm_extraction,
-          UNNEST(JSON_QUERY_ARRAY(parsed_json)) AS section_obj
-        WHERE parsed_json IS NOT NULL
-
-        UNION ALL
-
-        -- Path B (Safety Fallback): If a PDF caused non-JSON plain text output, preserve it as a single chunk
-        SELECT
-          nct_id,
-          gcs_uri,
-          'General Summary' AS section_type,
-          raw_response AS chunk_text
-        FROM
-          raw_llm_extraction
-        WHERE parsed_json IS NULL AND raw_response IS NOT NULL
-      )
-      SELECT
-        GENERATE_UUID() AS chunk_id,
-        IFNULL(nct_id, 'UNKNOWN_NCT') AS nct_id,
-        gcs_uri,
-        IFNULL(section_type, 'General') AS section_type,
-        chunk_text,
-        @ingest_ts AS created_at
-      FROM
-        unnested_chunks
-      WHERE
-        chunk_text IS NOT NULL
-        AND LENGTH(TRIM(chunk_text)) > 15;
-  """
-
-  # 4. Step 3: Generate Embeddings for the newly extracted sections of `@gcs_uri`
-  incremental_embed_sql = f"""
-      INSERT INTO `{PROJECT_ID}.{DATASET_ID}.embedded_doc_chunks`
-        (chunk_id, nct_id, gcs_uri, section_type, chunk_text, text_embedding)
-      SELECT
-        chunk_id,
-        nct_id,
-        gcs_uri,
-        section_type,
-        chunk_text,
-        ml_generate_embedding_result AS text_embedding
-      FROM ML.GENERATE_EMBEDDING(
-        MODEL `{PROJECT_ID}.{DATASET_ID}.embedding_model`,
-        (
-          SELECT
-            chunk_id,
-            nct_id,
-            gcs_uri,
-            section_type,
-            chunk_text,
-            CONCAT(
-              'Clinical Trial NCTId: ', nct_id,
-              ' | Document Section: ', section_type,
-              ' | Text: ', chunk_text
-            ) AS content
-          FROM `{PROJECT_ID}.{DATASET_ID}.extracted_doc_chunks`
-          WHERE gcs_uri = @gcs_uri AND created_at = @ingest_ts
-        ),
-        STRUCT(TRUE AS flatten_json_output)
-      )
-      WHERE ARRAY_LENGTH(ml_generate_embedding_result) > 0;
-  """
+  incremental_extract_sql = build_incremental_extraction_query(
+      project_id=settings.PROJECT_ID,
+      dataset_id=settings.DATASET_ID,
+      extractor_model=settings.EXTRACTOR_MODEL,
+  )
+  incremental_embed_sql = build_incremental_embedding_query(
+      project_id=settings.PROJECT_ID,
+      dataset_id=settings.DATASET_ID,
+      embedding_model=settings.EMBEDDING_MODEL,
+  )
 
   job_config = bigquery.QueryJobConfig(
       query_parameters=[
@@ -348,16 +235,12 @@ Return ONLY a valid JSON array of objects (no markdown fences, no extra commenta
   bq_status = "SUCCESS"
   rows_extracted = 0
   try:
-    extract_job = bq_client.query(
-        incremental_extract_sql, job_config=job_config
+    rows_extracted = await asyncio.to_thread(
+        _execute_incremental_ingest,
+        incremental_extract_sql,
+        incremental_embed_sql,
+        job_config,
     )
-    extract_job.result()
-    rows_extracted = extract_job.num_dml_affected_rows or 0
-
-    if rows_extracted > 0:
-      embed_job = bq_client.query(incremental_embed_sql, job_config=job_config)
-      embed_job.result()
-
     print(
         f"✅ [BIGQUERY INCREMENTAL INGEST] Extracted & embedded {rows_extracted} section chunks for {gcs_uri}",
         flush=True,

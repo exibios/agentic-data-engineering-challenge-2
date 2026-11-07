@@ -1,15 +1,9 @@
 # agent/tools.py
 import logging
-import os
 from typing import Any, Dict, List
-from google.cloud import bigquery
 import httpx
-
-try:
-  from dotenv import load_dotenv
-  load_dotenv()
-except ImportError:
-  pass
+from agent.clients import get_bq_client
+from agent.config import settings
 
 # Configure visible console logging for Day 8 Acceptance Criteria
 logging.basicConfig(
@@ -18,13 +12,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("day8_adk_tools")
 
-PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
-DATASET_ID = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
-TABLE_ID = os.getenv("TABLE_ID") or os.getenv("BQ_TABLE") or "dummy_table_id"
-RAG_API_URL = os.getenv("RAG_API_URL", "http://dummy-rag-api-url/search")
+PROJECT_ID = settings.PROJECT_ID
+DATASET_ID = settings.DATASET_ID
+TABLE_ID = settings.TABLE_ID
+RAG_API_URL = settings.RAG_API_URL
 FULL_TABLE_ID = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
-
-bq_client = bigquery.Client(project=PROJECT_ID)
 
 
 def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
@@ -64,6 +56,7 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
     }
 
   try:
+    bq_client = get_bq_client()
     query_job = bq_client.query(sql_query)
     rows = [dict(row) for row in query_job.result()]
     logger.info(f"✅ SQL Tool returned {len(rows)} rows.")

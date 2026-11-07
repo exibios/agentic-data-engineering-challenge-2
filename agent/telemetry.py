@@ -1,35 +1,25 @@
 # agent/telemetry.py
-"""OpenTelemetry tracing and direct Cloud Logging for FinOps / Token costs."""
+"""OpenTelemetry tracing and zero-latency structured logging for FinOps / Token costs."""
 
-import os
+import json
+import sys
 from typing import Any, Dict
-from google.cloud import logging as gcp_logging
 from opentelemetry import trace
 from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
-PROJECT_ID = os.getenv("GCP_PROJECT", "data4ai-challenge-03")
+from agent.config import settings
 
 # 1. Initialize OpenTelemetry Tracer
 tracer_provider = TracerProvider()
 try:
-  cloud_trace_exporter = CloudTraceSpanExporter(project_id=PROJECT_ID)
+  cloud_trace_exporter = CloudTraceSpanExporter(project_id=settings.PROJECT_ID)
   tracer_provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
   trace.set_tracer_provider(tracer_provider)
 except Exception:
   pass
 
 tracer = trace.get_tracer("clinical_trials_agent")
-
-# 2. Initialize Direct Cloud Logging Client
-# This writes directly to GCP Cloud Logging via the API (works from localhost and Cloud Run)
-try:
-  logging_client = gcp_logging.Client(project=PROJECT_ID)
-  gcp_logger = logging_client.logger("agent_telemetry_log")
-except Exception as e:
-  gcp_logger = None
-  print(f"⚠️ Cloud Logging client initialization warning: {e}")
 
 
 def log_agent_session_metrics(
@@ -41,9 +31,10 @@ def log_agent_session_metrics(
     response_tokens: int,
     pii_intercepted: bool = False,
 ) -> None:
-  """Writes structured JSON directly to Cloud Logging (jsonPayload)
+  """Writes structured JSON directly to stdout for Cloud Logging (jsonPayload) ingestion.
 
-  for the Day 10 token and latency metrics.
+  Zero-latency stdout logging is automatically ingested into Cloud Logging
+  on Cloud Run, matching the log-based metrics for Day 10.
   """
   total_tokens = prompt_tokens + response_tokens
 
@@ -53,6 +44,8 @@ def log_agent_session_metrics(
   )
 
   structured_payload: Dict[str, Any] = {
+      "severity": "INFO",
+      "message": f"Telemetry emitted for session {session_id}",
       "event_type": "agent_execution_telemetry",
       "session_id": session_id,
       "user_prompt": user_prompt,
@@ -65,12 +58,5 @@ def log_agent_session_metrics(
       "pii_intercepted": pii_intercepted,
   }
 
-  # Direct write to GCP Cloud Logging as a structured JSON payload
-  if gcp_logger:
-    try:
-      gcp_logger.log_struct(structured_payload, severity="INFO")
-    except Exception as e:
-      print(f"Failed to send log to GCP Cloud Logging: {e}")
-
-  # Also flush to stdout for local terminal visibility
-  print(f"📡 [TELEMETRY EMITTED]: {structured_payload}", flush=True)
+  # Direct zero-latency structured output to stdout (parsed automatically by GCP Cloud Logging)
+  print(json.dumps(structured_payload), file=sys.stdout, flush=True)

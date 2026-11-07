@@ -9,14 +9,9 @@ from typing import Any, Dict, Optional
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.cloud import pubsub_v1
 from google.genai import types
-
-try:
-  from dotenv import load_dotenv
-  load_dotenv()
-except ImportError:
-  pass
+from agent.clients import get_pubsub_publisher
+from agent.config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,21 +19,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("governance_agent")
 
-PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
-LOCATION = os.getenv("LOCATION") or os.getenv("GCP_LOCATION") or "dummy-location"
-MODEL_NAME = os.getenv("MODEL_NAME") or os.getenv("AGENT_MODEL") or "dummy-model-name"
-DLQ_TOPIC_ID = (
-    os.getenv("DLQ_TOPIC_ID")
-    or os.getenv("DWL_TOPIC_ID")
-    or "dummy-dlq-topic-id"
-)
-GOOGLE_GENAI_USE_VERTEXAI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "dummy-vertexai-flag")
+PROJECT_ID = settings.PROJECT_ID
+LOCATION = settings.LOCATION
+MODEL_NAME = settings.MODEL_NAME
+DLQ_TOPIC_ID = settings.DLQ_TOPIC_ID
+GOOGLE_GENAI_USE_VERTEXAI = settings.GOOGLE_GENAI_USE_VERTEXAI
 
 # Ensure Vertex AI global endpoint is configured for gemini-3.8-flash
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = GOOGLE_GENAI_USE_VERTEXAI
 os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
 os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
-
 
 GOVERNANCE_INSTRUCTION = """You are the autonomous Data Governance Agent in an Agent-to-Agent (A2A) pipeline.
 Your job is to inspect incoming document ingestion metadata and sample payload text before BigQuery ingestion.
@@ -71,7 +61,7 @@ def publish_to_dlq(payload: Dict[str, Any], reason: str) -> Optional[str]:
       f"Reason: {reason} | Payload: {json.dumps(payload)}"
   )
   try:
-    publisher = pubsub_v1.PublisherClient()
+    publisher = get_pubsub_publisher()
     topic_path = publisher.topic_path(PROJECT_ID, DLQ_TOPIC_ID)
     dlq_message = {
         "status": "ROUTED_TO_DLQ",

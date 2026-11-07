@@ -1,22 +1,14 @@
 import os
 import httpx
-from google.cloud import bigquery, storage
+from google.cloud import bigquery
+from agent.clients import get_bq_client, get_storage_client
+from agent.config import settings
 
-try:
-  from dotenv import load_dotenv
-  load_dotenv()
-except ImportError:
-  pass
-
-# === Project Constants from Environment with Dummy Defaults ===
-PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
-DATASET_ID = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
-TABLE_ID = os.getenv("TABLE_ID") or os.getenv("BQ_TABLE") or "dummy_table_id"
-BUCKET_NAME = (
-    os.getenv("BUCKET_NAME")
-    or os.getenv("GCS_BUCKET")
-    or "dummy-bucket-name"
-)
+# === Project Constants from Centralized Settings ===
+PROJECT_ID = settings.PROJECT_ID
+DATASET_ID = settings.DATASET_ID
+TABLE_ID = settings.TABLE_ID
+BUCKET_NAME = settings.BUCKET_NAME
 MAX_PDFS = int(os.getenv("MAX_PDFS", "20"))  # Respects the 50-100 document budget
 
 
@@ -38,9 +30,10 @@ def build_cdn_url(nct_id: str, filename: str) -> str:
 
 
 def main():
-  storage_client = storage.Client(project=PROJECT_ID)
+  storage_client = get_storage_client()
   bucket = storage_client.bucket(BUCKET_NAME)
-  bq_client = bigquery.Client(project=PROJECT_ID)
+  bq_client = get_bq_client()
+
 
   # Ensure structured table exists before inserting
   full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"

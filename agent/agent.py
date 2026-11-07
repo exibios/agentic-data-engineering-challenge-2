@@ -1,25 +1,19 @@
 # agent/agent.py
 import os
 from google.adk.agents import Agent
+from agent.config import settings
 from agent.tools import execute_clinical_sql, search_clinical_protocols
 
-try:
-  from dotenv import load_dotenv
-  load_dotenv()
-except ImportError:
-  pass
-
-PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
-LOCATION = os.getenv("LOCATION") or os.getenv("GCP_LOCATION") or "dummy-location"
-MODEL_NAME = os.getenv("MODEL_NAME") or os.getenv("AGENT_MODEL") or "dummy-model-name"
-DATASET_ID = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
-TABLE_ID = os.getenv("TABLE_ID") or os.getenv("BQ_TABLE") or "dummy_table_id"
-GOOGLE_GENAI_USE_VERTEXAI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "dummy-vertexai-flag")
-
 # Ensure ADK uses Vertex AI backend in your GCP project
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = GOOGLE_GENAI_USE_VERTEXAI
-os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = settings.GOOGLE_GENAI_USE_VERTEXAI
+os.environ["GOOGLE_CLOUD_PROJECT"] = settings.PROJECT_ID
+os.environ["GOOGLE_CLOUD_LOCATION"] = settings.LOCATION
+
+PROJECT_ID = settings.PROJECT_ID
+LOCATION = settings.LOCATION
+MODEL_NAME = settings.MODEL_NAME
+DATASET_ID = settings.DATASET_ID
+TABLE_ID = settings.TABLE_ID
 
 SYSTEM_INSTRUCTION = f"""You are an autonomous Clinical Trials Data Agent for project `{PROJECT_ID}`.
 You have access to two specialized tools. Route every user question dynamically based on intent:

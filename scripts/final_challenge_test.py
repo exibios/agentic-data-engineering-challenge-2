@@ -27,6 +27,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import urllib.error
 import urllib.request
 
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except ImportError:
+  pass
+
 # Default Challenge Environment Variables
 PROJECT_ID = os.environ.setdefault("GCP_PROJECT", "data4ai-challenge-03")
 DATASET_ID = os.environ.setdefault("BQ_DATASET", "clinical_trials_2")
@@ -36,6 +42,7 @@ BUCKET_NAME = os.environ.setdefault(
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "global")
+
 
 SCORECARD: List[Dict[str, Any]] = []
 
