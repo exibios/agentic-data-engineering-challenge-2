@@ -1,3 +1,4 @@
+./Apps/Antigravity\ IDE/antigravity-ide
 
 gcloud auth login -> Login para CLI
 
