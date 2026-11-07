@@ -1,0 +1,73 @@
+
+gcloud auth login -> Login para CLI
+
+gcloud auth application-default login -> Login para SDK
+
+
+Credentials saved to file: [/usr/local/google/home/cfrancoisrael/.config/gcloud/application_default_credentials.json]
+
+CALL LOCAL ENDPOINT
+./infra/load_test_native.sh http://localhost:8080 5 5
+
+
+#CLOUD_RUN_URL=$(gcloud run services describe clinical-trials-rag-api --region us-central1 --format='value(status.url)')
+### CALL CLOUD RUN END POINT
+CLOUD_RUN_URL=https://clinical-trials-rag-api-80080086039.us-central1.run.app
+./infra/load_test_native.sh "${CLOUD_RUN_URL}" 5 5
+
+
+
+### deploy cloud run
+gcloud run deploy clinical-trials-rag-api \
+  --source . \
+  --project data4ai-challenge-03 \
+  --region us-central1 \
+  --set-env-vars "GCP_PROJECT=data4ai-challenge-03,BQ_DATASET=clinical_trials_2,GCS_BUCKET=data4ai-challenge-03-agentic-data-engineering-raw-docs-2" \
+  --allow-unauthenticated
+
+
+
+
+CLOUD_RUN_URL=$(gcloud run services describe clinical-trials-rag-api --region us-central1 --project data4ai-challenge-03 --format='value(status.url)')
+
+python3 -m scripts.final_challenge_test --url "${CLOUD_RUN_URL}" --upload-gcs --auth
+
+
+gcloud run deploy clinical-trials-rag-api \
+  --source . \
+  --project data4ai-challenge-03 \
+  --region us-central1 \
+  --set-env-vars "GCP_PROJECT=data4ai-challenge-03,GCP_LOCATION=global,GOOGLE_GENAI_USE_VERTEXAI=True,GOOGLE_CLOUD_PROJECT=data4ai-challenge-03,GOOGLE_CLOUD_LOCATION=global,AGENT_MODEL=gemini-3.8-flash,BQ_DATASET=clinical_trials_2,GCS_BUCKET=data4ai-challenge-03-agentic-data-engineering-raw-docs-2,FIRESTORE_COLLECTION=agent_sessions,EMBEDDING_MODEL=embedding_model,EXTRACTOR_MODEL=model_extractor" \
+  --allow-unauthenticated
+
+
+Prot_SAP_000.pdf
+ICF_000.pdf
+Prot_000.pdf
+
+
+curl -sL "https://cdn.clinicaltrials.gov/large-docs/79/NCT04843579/Prot_SAP_000.pdf" \
+  | gcloud storage cp --content-type="application/pdf" - gs://data4ai-challenge-03-agentic-data-engineering-raw-docs-2/raw/NCT04843579/Prot_SAP_000.pdf
+  
+  
+
+SELECT
+  job_id,
+  user_email,
+  creation_time,
+  start_time,
+  end_time,
+  state,
+  total_bytes_billed,
+  total_slot_ms,
+  query
+FROM
+  `region-US`.INFORMATION_SCHEMA.JOBS_BY_USER -- Change region if necessary (e.g., region-EU)
+WHERE
+  creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+  AND (
+    UPPER(query) LIKE '%ML.GENERATE_TEXT%'
+    OR UPPER(query) LIKE '%VECTOR_SEARCH%'
+  )
+ORDER BY
+  creation_time DESC;
