@@ -11,7 +11,7 @@ except ImportError:
   pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) # immutable
 class Settings:
   # GCP & Region
   PROJECT_ID: str = (
