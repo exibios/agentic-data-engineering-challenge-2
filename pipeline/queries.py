@@ -213,3 +213,40 @@ def build_incremental_embedding_query(
       dataset_id=dataset_id,
       embedding_model=embedding_model,
   )
+
+
+UPSERT_STUDIES_METADATA_TEMPLATE = """
+MERGE INTO `{project_id}.{dataset_id}.{table_id}` T
+USING (
+  SELECT
+    @nct_id AS nct_id,
+    @brief_title AS brief_title,
+    @overall_status AS overall_status,
+    @doc_filename AS doc_filename,
+    @cdn_url AS cdn_url,
+    @gcs_uri AS gcs_uri,
+    @ingest_ts AS ingested_at
+) S
+ON T.nct_id = S.nct_id AND T.gcs_uri = S.gcs_uri
+WHEN MATCHED THEN
+  UPDATE SET
+    brief_title = S.brief_title,
+    overall_status = S.overall_status,
+    doc_filename = S.doc_filename,
+    cdn_url = S.cdn_url,
+    ingested_at = S.ingested_at
+WHEN NOT MATCHED THEN
+  INSERT (nct_id, brief_title, overall_status, doc_filename, cdn_url, gcs_uri, ingested_at)
+  VALUES (S.nct_id, S.brief_title, S.overall_status, S.doc_filename, S.cdn_url, S.gcs_uri, S.ingested_at);
+"""
+
+
+def build_upsert_metadata_query(
+    project_id: str, dataset_id: str, table_id: str
+) -> str:
+  return UPSERT_STUDIES_METADATA_TEMPLATE.format(
+      project_id=project_id,
+      dataset_id=dataset_id,
+      table_id=table_id,
+  )
+

@@ -14,11 +14,13 @@ from agent.governance_agent import verify_ingestion_payload_a2a
 from agent.guardrails import redact_pii_dlp
 from agent.memory import SessionMemory
 from agent.telemetry import log_agent_session_metrics, tracer
+from pipeline.metadata_service import fetch_study_metadata_or_fallback
 from pipeline.queries import (
     build_incremental_embedding_query,
     build_incremental_extraction_query,
     build_metadata_query,
     build_semantic_search_query,
+    build_upsert_metadata_query,
 )
 from pipeline.schemas import (
     ChunkHit,
@@ -210,8 +212,46 @@ async def handle_eventarc_gcs_upload(request: Request):
         "governance_decision": decision,
     }
 
-  # 3. Step 2 & 3: Incremental Extraction and Embedding (non-blocking)
+  # 3. Step 1: Idempotent Metadata Ingestion
   ingest_timestamp = datetime.now(timezone.utc)
+  filename = object_name.split("/")[-1] if "/" in object_name else object_name
+  meta_record = fetch_study_metadata_or_fallback(nct_id, filename, gcs_uri)
+
+  upsert_meta_sql = build_upsert_metadata_query(
+      project_id=settings.PROJECT_ID,
+      dataset_id=settings.DATASET_ID,
+      table_id=settings.TABLE_ID,
+  )
+  meta_job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("nct_id", "STRING", meta_record["nct_id"]),
+          bigquery.ScalarQueryParameter(
+              "brief_title", "STRING", meta_record["brief_title"]
+          ),
+          bigquery.ScalarQueryParameter(
+              "overall_status", "STRING", meta_record["overall_status"]
+          ),
+          bigquery.ScalarQueryParameter(
+              "doc_filename", "STRING", meta_record["doc_filename"]
+          ),
+          bigquery.ScalarQueryParameter("cdn_url", "STRING", meta_record["cdn_url"]),
+          bigquery.ScalarQueryParameter("gcs_uri", "STRING", meta_record["gcs_uri"]),
+          bigquery.ScalarQueryParameter("ingest_ts", "TIMESTAMP", ingest_timestamp),
+      ]
+  )
+
+  meta_status = "SUCCESS"
+  try:
+    await asyncio.to_thread(_run_query, upsert_meta_sql, meta_job_config)
+    print(
+        f"✅ [BIGQUERY METADATA UPSERT] Ingested study metadata for {nct_id} ({gcs_uri})",
+        flush=True,
+    )
+  except Exception as e:
+    meta_status = f"META_ERROR: {str(e)}"
+    print(f"❌ [BIGQUERY METADATA ERROR]: {e}", flush=True)
+
+  # 4. Step 2 & 3: Incremental Extraction and Embedding (non-blocking)
   incremental_extract_sql = build_incremental_extraction_query(
       project_id=settings.PROJECT_ID,
       dataset_id=settings.DATASET_ID,
@@ -253,6 +293,7 @@ async def handle_eventarc_gcs_upload(request: Request):
       "status": "INGESTED_AND_VERIFIED",
       "nct_id": nct_id,
       "gcs_uri": gcs_uri,
+      "metadata_status": meta_status,
       "sections_extracted": rows_extracted,
       "bigquery_status": bq_status,
       "governance_decision": decision,
