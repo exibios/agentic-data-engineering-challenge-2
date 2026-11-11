@@ -186,6 +186,12 @@ async def handle_eventarc_gcs_upload(request: Request):
 
   bucket = body.get("bucket", settings.BUCKET_NAME)
   object_name = body.get("name", "")
+
+  # GUARD CLAUSE: Only process files inside the raw/ folder. Ignore everything else.
+  if not object_name.startswith("raw/"):
+    print(f"🛡️ Ignoring object outside ingestion scope: {object_name}", flush=True)
+    return {"status": "ignored", "reason": "outside raw prefix"}
+
   size_bytes = int(body.get("size", 1024))
   sample_text = body.get("sample_text", "")
 

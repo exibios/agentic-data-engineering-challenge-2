@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
-# scripts/final_challenge_test.py
-"""Cloud Run & Local Compatible End-to-End Verification Suite (Days 6 - 10).
+'''
+CLOUD_RUN_URL=$(gcloud run services describe clinical-trials-rag-api --region us-central1 --project data4ai-challenge-03 --format='value(status.url)')
+
+python3 -m scripts.final_challenge_test --url "${CLOUD_RUN_URL}" --upload-gcs --auth
+
+'''
+
+"""
+Cloud Run & Local Compatible End-to-End Verification Suite (Days 6 - 10).
 
 Usage:
   1. Against Deployed Cloud Run Service (with live GCS upload trigger):

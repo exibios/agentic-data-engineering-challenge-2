@@ -1,7 +1,13 @@
 # agent/tools.py
 import logging
+import subprocess
 from typing import Any, Dict, List
+from urllib.parse import urlparse
+
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import id_token
 import httpx
+
 from agent.clients import get_bq_client
 from agent.config import settings
 
@@ -16,7 +22,54 @@ PROJECT_ID = settings.PROJECT_ID
 DATASET_ID = settings.DATASET_ID
 TABLE_ID = settings.TABLE_ID
 RAG_API_URL = settings.RAG_API_URL
+
 FULL_TABLE_ID = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+
+
+def _normalize_search_url(raw_url: str) -> str:
+  """Ensures the RAG URL always ends with /search even if set to the base Cloud Run URL."""
+  cleaned = raw_url.strip().rstrip("/")
+  if not cleaned.endswith("/search"):
+    return f"{cleaned}/search"
+  return cleaned
+
+
+def _get_bearer_headers(target_url: str) -> Dict[str, str]:
+  """Builds HTTP headers with the exact OIDC Bearer Token used by gcloud curl."""
+  headers: Dict[str, str] = {
+      "accept": "*/*",
+      "Content-Type": "application/json",
+  }
+
+  if "localhost" in target_url or "127.0.0.1" in target_url:
+    return headers
+
+  # 1. Primary (Local / Cloud Shell): Use `gcloud auth print-identity-token` FIRST!
+  # In Cloud Shell/GCE, the metadata server returns a VM service account token that lacks
+  # run.invoker, whereas `gcloud auth print-identity-token` uses your authorized user token.
+  try:
+    token = subprocess.check_output(
+        ["gcloud", "auth", "print-identity-token"],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    ).strip()
+    if token:
+      headers["Authorization"] = f"Bearer {token}"
+      return headers
+  except Exception:
+    pass
+
+  # 2. Fallback (When running inside the Cloud Run container where gcloud CLI is absent):
+  try:
+    parsed = urlparse(target_url)
+    audience = f"{parsed.scheme}://{parsed.netloc}"
+    token = id_token.fetch_id_token(GoogleAuthRequest(), audience)
+    if token:
+      headers["Authorization"] = f"Bearer {token}"
+  except Exception as e:
+    logger.warning(f"⚠️ Could not obtain OIDC Bearer token: {e}")
+
+  return headers
 
 
 def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
@@ -26,7 +79,8 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
   aggregations, group-bys, trial statuses, or filtering by NCTId.
 
   Target Table Schema:
-  `studies_metadata` (query `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`):
+  `studies_metadata` (query
+  `data4ai-challenge-03.clinical_trials_2.studies_metadata`):
     - nct_id (STRING): Unique clinical trial ID (e.g., 'NCT04001234')
     - brief_title (STRING): Title of the study
     - overall_status (STRING): Trial status (e.g., 'COMPLETED', 'RECRUITING')
@@ -35,8 +89,8 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
     - gcs_uri (STRING): Cloud Storage URI of the raw PDF
 
   Args:
-      sql_query: A valid BigQuery Standard SQL SELECT statement querying
-        the fully-qualified studies metadata table.
+      sql_query: A valid BigQuery Standard SQL SELECT statement querying the
+        fully-qualified studies metadata table.
 
   Returns:
       A dictionary containing the executed SQL and returned rows.
@@ -45,10 +99,13 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
       "🎯 [ADK ROUTING LOG] -> Selected Tool: SQL Execution Tool"
       " (Analytical Intent)"
   )
-  logger.info(f"Executing BigQuery SQL: {sql_query}")
+  resolved_sql = sql_query.replace(
+      "{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}", FULL_TABLE_ID
+  )
+  logger.info(f"Executing BigQuery SQL: {resolved_sql}")
 
   # Basic safety guardrail: allow SELECT / WITH statements only
-  cleaned_sql = sql_query.strip().upper()
+  cleaned_sql = resolved_sql.strip().upper()
   if not (cleaned_sql.startswith("SELECT") or cleaned_sql.startswith("WITH")):
     return {
         "status": "error",
@@ -57,13 +114,13 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
 
   try:
     bq_client = get_bq_client()
-    query_job = bq_client.query(sql_query)
+    query_job = bq_client.query(resolved_sql)
     rows = [dict(row) for row in query_job.result()]
     logger.info(f"✅ SQL Tool returned {len(rows)} rows.")
     return {
         "status": "success",
         "tool_used": "execute_clinical_sql",
-        "executed_sql": sql_query,
+        "executed_sql": resolved_sql,
         "row_count": len(rows),
         "rows": rows[:50],  # Cap output to protect prompt context length
     }
@@ -93,15 +150,23 @@ def search_clinical_protocols(
       "🔍 [ADK ROUTING LOG] -> Selected Tool: Vector Search Tool"
       " (Semantic/Conceptual Intent)"
   )
+  search_url = _normalize_search_url(RAG_API_URL)
   logger.info(
-      f"Querying FastAPI RAG endpoint ({RAG_API_URL}) for: '{search_query}'"
+      f"Querying FastAPI RAG endpoint ({search_url}) for: '{search_query}'"
   )
+
+  headers = _get_bearer_headers(search_url)
 
   try:
     with httpx.Client(timeout=30.0) as client:
       response = client.post(
-          RAG_API_URL,
-          json={"query": search_query, "top_k": top_k},
+          search_url,
+          json={
+              "query": search_query,
+              "top_k": top_k,
+              "session_id": "adk-agent-session",
+          },
+          headers=headers,
       )
       response.raise_for_status()
       data = response.json()

@@ -1,4 +1,6 @@
 # scripts/test_day8_agent.py
+# python3 -m scripts.test_day8_agent
+
 import asyncio
 import os
 from google.adk.runners import Runner
