@@ -19,8 +19,8 @@ from agent.agent import root_agent
 PROJECT_ID = "data4ai-challenge-03"
 DEPLOY_REGION = "us-central1"  # Agent Engine hosting region
 STAGING_BUCKET = "gs://data4ai-challenge-03-agentic-data-engineering-raw-docs-2-stg"
-SERVICE_ACCOUNT = "80080086039-compute@developer.gserviceaccount.com"
-
+#SERVICE_ACCOUNT = "80080086039-compute@developer.gserviceaccount.com"
+SERVICE_ACCOUNT = "clinical-agent-sa@data4ai-challenge-03.iam.gserviceaccount.com"
 CLOUD_RUN_RAG_URL = "https://clinical-trials-rag-api-xqvchgmmha-uc.a.run.app/search"
 
 

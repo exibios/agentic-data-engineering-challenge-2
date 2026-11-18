@@ -24,6 +24,7 @@ class Settings:
       or os.getenv("GCP_LOCATION")
       or "dummy-location"
   )
+  REGION: str = (os.getenv("REGION") or "dummy-region")
 
   # BigQuery & Storage
   DATASET_ID: str = (
