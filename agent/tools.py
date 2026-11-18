@@ -10,6 +10,7 @@ import httpx
 
 from agent.clients import get_bq_client
 from agent.config import settings
+import os
 
 # Configure visible console logging for Day 8 Acceptance Criteria
 logging.basicConfig(
@@ -34,19 +35,43 @@ def _normalize_search_url(raw_url: str) -> str:
   return cleaned
 
 
+# In agent/tools.py
 def _get_bearer_headers(target_url: str) -> Dict[str, str]:
-  """Builds HTTP headers with the exact OIDC Bearer Token used by gcloud curl."""
+  """Uses Metadata Server OIDC in Agent Runtime/Cloud Run, and gcloud CLI in Cloud Shell."""
   headers: Dict[str, str] = {
       "accept": "*/*",
       "Content-Type": "application/json",
   }
-
   if "localhost" in target_url or "127.0.0.1" in target_url:
     return headers
 
-  # 1. Primary (Local / Cloud Shell): Use `gcloud auth print-identity-token` FIRST!
-  # In Cloud Shell/GCE, the metadata server returns a VM service account token that lacks
-  # run.invoker, whereas `gcloud auth print-identity-token` uses your authorized user token.
+  parsed = urlparse(target_url)
+  audience = f"{parsed.scheme}://{parsed.netloc}"
+
+  # When running interactively in Cloud Shell, use the user's gcloud identity token
+  if os.getenv("CLOUD_SHELL") == "true":
+    try:
+      token = subprocess.check_output(
+          ["gcloud", "auth", "print-identity-token"],
+          text=True,
+          stderr=subprocess.DEVNULL,
+      ).strip()
+      if token:
+        headers["Authorization"] = f"Bearer {token}"
+        return headers
+    except Exception:
+      pass
+
+  # In Vertex AI Agent Runtime or Cloud Run, fetch OIDC token from the attached Service Account
+  try:
+    token = id_token.fetch_id_token(GoogleAuthRequest(), audience)
+    if token:
+      headers["Authorization"] = f"Bearer {token}"
+      return headers
+  except Exception as e:
+    logger.warning(f"⚠️ Metadata OIDC fetch failed ({e}); trying gcloud fallback...")
+
+  # Final fallback for local laptops
   try:
     token = subprocess.check_output(
         ["gcloud", "auth", "print-identity-token"],
@@ -55,21 +80,12 @@ def _get_bearer_headers(target_url: str) -> Dict[str, str]:
     ).strip()
     if token:
       headers["Authorization"] = f"Bearer {token}"
-      return headers
   except Exception:
     pass
 
-  # 2. Fallback (When running inside the Cloud Run container where gcloud CLI is absent):
-  try:
-    parsed = urlparse(target_url)
-    audience = f"{parsed.scheme}://{parsed.netloc}"
-    token = id_token.fetch_id_token(GoogleAuthRequest(), audience)
-    if token:
-      headers["Authorization"] = f"Bearer {token}"
-  except Exception as e:
-    logger.warning(f"⚠️ Could not obtain OIDC Bearer token: {e}")
-
   return headers
+
+
 
 
 def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:

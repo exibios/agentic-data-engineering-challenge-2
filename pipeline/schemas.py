@@ -4,6 +4,11 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+class ChatRequest(BaseModel):
+  prompt: str
+  user_id: str = "challenge-user"
+  session_id: Optional[str] = None
+
 class IngestRequest(BaseModel):
   nct_id: str = Field(..., examples=["NCT04001234"])
   filename: str = Field(..., examples=["Prot_000.pdf"])

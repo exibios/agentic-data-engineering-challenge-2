@@ -4,6 +4,7 @@ import base64
 from datetime import datetime, timezone
 import json
 import re
+import os
 import time
 import uuid
 from fastapi import FastAPI, HTTPException, Request
@@ -29,7 +30,10 @@ from pipeline.schemas import (
     MetadataResponse,
     SearchRequest,
     SearchResponse,
+    ChatRequest,
 )
+import vertexai
+from vertexai import agent_engines
 
 app = FastAPI(
     title="Clinical Trials Agentic Data Pipeline API",
@@ -303,4 +307,38 @@ async def handle_eventarc_gcs_upload(request: Request):
       "sections_extracted": rows_extracted,
       "bigquery_status": bq_status,
       "governance_decision": decision,
+  }
+
+@app.post("/v1/chat", tags=["Agent Runtime Proxy"])
+def chat_with_agent_runtime(req: ChatRequest):
+  """Forwards natural-language queries from FastAPI to the deployed Vertex AI Agent Engine."""
+  if not settings.AGENT_ENGINE_ID:
+    raise HTTPException(
+        status_code=500, detail="AGENT_ENGINE_RESOURCE_NAME env var not set."
+    )
+
+  vertexai.init(project=settings.PROJECT_ID, location=settings.REGION)
+  remote_agent = agent_engines.get(settings.AGENT_ENGINE_ID)
+
+  # Create or resume a managed Agent Engine Session
+  session_id = req.session_id
+  if not session_id:
+    session = remote_agent.create_session(user_id=req.user_id)
+    session_id = session["id"]
+
+  final_answer = []
+  for event in remote_agent.stream_query(
+      user_id=req.user_id,
+      session_id=session_id,
+      message=req.prompt,
+  ):
+    parts = event.get("content", {}).get("parts", [])
+    for part in parts:
+      if "text" in part:
+        final_answer.append(part["text"])
+
+  return {
+      "session_id": session_id,
+      "prompt": req.prompt,
+      "response": "".join(final_answer),
   }

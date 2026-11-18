@@ -8,12 +8,14 @@ from agent.tools import execute_clinical_sql, search_clinical_protocols
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = settings.GOOGLE_GENAI_USE_VERTEXAI
 os.environ["GOOGLE_CLOUD_PROJECT"] = settings.PROJECT_ID
 os.environ["GOOGLE_CLOUD_LOCATION"] = settings.LOCATION
+os.environ["GEMINI_MODEL_LOCATION"] = settings.GEMINI_MODEL_LOCATION
 
 PROJECT_ID = settings.PROJECT_ID
 LOCATION = settings.LOCATION
 MODEL_NAME = settings.MODEL_NAME
 DATASET_ID = settings.DATASET_ID
 TABLE_ID = settings.TABLE_ID
+GEMINI_MODEL_LOCATION = settings.GEMINI_MODEL_LOCATION
 
 SYSTEM_INSTRUCTION = f"""You are an autonomous Clinical Trials Data Agent for project `{PROJECT_ID}`.
 You have access to two specialized tools. Route every user question dynamically based on intent:

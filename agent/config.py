@@ -65,6 +65,8 @@ class Settings:
       "GOOGLE_GENAI_USE_VERTEXAI", "dummy-vertexai-flag"
   )
 
+  AGENT_ENGINE_ID: str = os.getenv("AGENT_ENGINE_RESOURCE_NAME", "")
+  GEMINI_MODEL_LOCATION: str = os.getenv("GEMINI_MODEL_LOCATION","dummy-gemini-model-location")
 
 settings = Settings()
 
@@ -81,3 +83,5 @@ RAG_API_URL = settings.RAG_API_URL
 DLQ_TOPIC_ID = settings.DLQ_TOPIC_ID
 FIRESTORE_COLLECTION = settings.FIRESTORE_COLLECTION
 GOOGLE_GENAI_USE_VERTEXAI = settings.GOOGLE_GENAI_USE_VERTEXAI
+AGENT_ENGINE_ID = settings.AGENT_ENGINE_ID
+GEMINI_MODEL_LOCATION = settings.GEMINI_MODEL_LOCATION
