@@ -14,3 +14,7 @@ opentelemetry-exporter-gcp-trace>=1.7.0
 google-cloud-logging>=3.10.0
 google-cloud-dlp>=3.40.0
 google-cloud-aiplatform[agent_engines,adk]>=2.7
+opentelemetry-exporter-otlp-proto-http>=1.24.0
+opentelemetry-instrumentation-google-genai
+opentelemetry-instrumentation-httpx
+opentelemetry-instrumentation-grpc

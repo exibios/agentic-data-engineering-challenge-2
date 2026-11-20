@@ -3,6 +3,13 @@
 
 import asyncio
 import os
+from pathlib import Path
+import sys
+
+repo_root = Path(__file__).resolve().parent.parent
+if str(repo_root) not in sys.path:
+  sys.path.insert(0, str(repo_root))
+
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types

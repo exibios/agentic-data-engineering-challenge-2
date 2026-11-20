@@ -9,6 +9,13 @@ gcloud pubsub subscriptions pull clinical-trials-ingest-dlq-sub \
 '''
 
 import asyncio
+from pathlib import Path
+import sys
+
+repo_root = Path(__file__).resolve().parent.parent
+if str(repo_root) not in sys.path:
+  sys.path.insert(0, str(repo_root))
+
 from agent.governance_agent import verify_ingestion_payload_a2a
 
 BUCKET = "data4ai-challenge-03-agentic-data-engineering-raw-docs-2"

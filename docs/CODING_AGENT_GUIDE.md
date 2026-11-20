@@ -1,6 +1,7 @@
 # Clinical Trials Agentic Data Pipeline - Coding Agent Guide
 
 > **Target Audience:** Coding agents (LLMs / pair programmers) needing high-signal, comprehensive context to modify, debug, or extend this repository without exploratory file reading.
+> **Aligned Curriculum:** Google Cloud Partner Data Agent Challenge (Days 1–10) detailed in [`docs/challenge_context.md`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/docs/challenge_context.md).
 
 ---
 
@@ -12,176 +13,190 @@ An autonomous, event-driven data engineering and agentic RAG pipeline built on G
                       [ClinicalTrials.gov / User]
                                    │
                                    ▼
-        ┌──────────────────────────────────────────────────────┐
-        │                 FastAPI on Cloud Run                 │
-        │               (pipeline/main.py: 8080)               │
-        ├──────────────────────────┬───────────────────────────┤
-        │  POST /v1/ingest         │  POST /search             │
-        │  POST /v1/events/gcs-    │  GET /v1/metadata/{id}    │
-        │       ingest (Eventarc)  │                           │
-        └────────────┬─────────────┴─────────────▲─────────────┘
-                     │                           │
-        (Async File Stage)               (Semantic RAG Tool)
-                     ▼                           │
-        ┌────────────────────────┐  ┌────────────┴─────────────┐
-        │  Cloud Storage (GCS)   │  │   ADK Conversational     │
-        │  gs://.../raw/{nct_id} │  │       Data Agent         │
-        └────────────┬───────────┘  │    (agent/agent.py)      │
-                     │              └────────────┬─────────────┘
-          (Eventarc / PubSub)                    │
-                     ▼                 (SQL Tool / Vector Tool)
-        ┌────────────────────────┐               │
-        │ A2A Governance Agent   │               ▼
-        │ (governance_agent.py)  │  ┌──────────────────────────┐
-        │  - Valid Schema        │  │   BigQuery AI Layer      │
-        │  - DLP / PII Sanitized │  │  (clinical_trials_2)     │
-        │  - Rejections -> DLQ   │  │  - studies_metadata      │
-        └────────────┬───────────┘  │  - extracted_doc_chunks  │
-                     │ (Approved)   │  - embedded_doc_chunks   │
-                     ▼              │  - VECTOR_SEARCH (Cosine)│
-        ┌────────────────────────┐  └──────────────────────────┘
-        │ BigQuery Object Table  │
-        │ + ML.GENERATE_TEXT     │
+        ┌───────────────────────────────────────────────────────────────┐
+        │                     FastAPI on Cloud Run                      │
+        │                   (pipeline/main.py: 8080)                    │
+        ├──────────────────────────┬────────────────────────────────────┤
+        │  POST /v1/ingest         │  POST /search                      │
+        │  POST /v1/events/gcs-    │  GET /v1/metadata/{id}             │
+        │       ingest (Eventarc)  │  POST /v1/chat (Agent Runtime)     │
+        └────────────┬─────────────┴─────────────────▲──────────────────┘
+                     │                               │
+        (Async File Stage)                   (Semantic RAG Tool)
+                     ▼                               │
+        ┌────────────────────────┐      ┌────────────┴──────────────────┐
+        │  Cloud Storage (GCS)   │      │ Vertex AI Agent Engine Runtime│
+        │  gs://.../raw/{nct_id} │      │      (ADK root_agent)         │
+        └────────────┬───────────┘      │     - Python 3.11 BYOSA       │
+                     │                  │     - Managed Session Memory  │
+          (Eventarc / PubSub)           └────────────┬──────────────────┘
+                     ▼                               │
+        ┌────────────────────────┐                   │ (SQL Tool / Vector Tool)
+        │ A2A Governance Agent   │                   │
+        │ (governance_agent.py)  │                   ▼
+        │  - Valid Schema        │      ┌───────────────────────────────┐
+        │  - DLP / PII Sanitized │      │      BigQuery AI Layer        │
+        │  - Rejections -> DLQ   │      │     (clinical_trials_2)       │
+        └────────────┬───────────┘      │  - studies_metadata (Upsert)  │
+                     │ (Approved)       │  - extracted_doc_chunks       │
+                     ▼                  │  - embedded_doc_chunks        │
+        ┌────────────────────────┐      │  - doc_chunks_cosine_idx      │
+        │ BigQuery Object Table  │      │  - VECTOR_SEARCH (Cosine)     │
+        │ + ML.GENERATE_TEXT     │      └───────────────────────────────┘
         │ + ML.GENERATE_EMBEDDING│
         └────────────────────────┘
 ```
 
 ---
 
-## 2. Core Modules: `/agent` (Agent Development Kit & LLM Ops)
+## 2. Curriculum Mapping: 10-Day Challenge Context
+
+This codebase fulfills the complete requirements of the 10-Day Agentic Data Engineering Challenge ([`docs/challenge_context.md`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/docs/challenge_context.md)):
+
+| Day | Focus Topic | Core Implementation in this Repository | Key Deliverable / Acceptance Criteria |
+| :--- | :--- | :--- | :--- |
+| **Day 1** | Gen AI & Gemini Enterprise | `gemini-3.8-flash` configured via Vertex AI endpoint (`settings.LOCATION="global"`). | Baseline LLM orchestration setup. |
+| **Day 2** | Vertex AI Studio & Multimodal | Multimodal PDF prompt extraction in BigQuery Object Tables (`model_extractor`). | Direct multimodal PDF comprehension. |
+| **Day 3** | Google Cloud Agents & ADK | Initialized `google.adk` foundation (`Agent`, `Runner`, `AdkApp`). | Agent Development Kit architecture initialized. |
+| **Day 4** | Prompt Engineering & Memory | System instructions with dynamic intent routing; Firestore session state (`agent/memory.py`). | Structured tool calling schemas and persistent turns. |
+| **Day 5** | AgentOps & Governance | Cloud DLP guardrails (`agent/guardrails.py`), safety filters, and structured logging. | Guardrail and compliance foundation. |
+| **Day 6** | Ingestion & Object Tables | `POST /v1/ingest`, BigQuery Object Table `documents_table`, `docs/ARCHITECTURE.md`, `docs/ADR-001-agentic-ingestion.md`. | Swagger UI (`/docs`) operational; non-blocking 202 async ingestion. |
+| **Day 7** | Embeddings & Vector Search | `ML.GENERATE_EMBEDDING` (`embedding_model`), `CREATE VECTOR INDEX` (IVF COSINE), FastAPI `/search`. | `POST /search` returns top chunks with cosine similarity. |
+| **Day 8** | ADK Conversational Agent | `clinical_trials_data_agent` with `execute_clinical_sql` & `search_clinical_protocols`. | Dynamic intent routing (SQL vs. Vector vs. Hybrid). |
+| **Day 9** | Eventarc & A2A Governance | GCS Eventarc trigger, Pub/Sub DLQ, `verify_ingestion_payload_a2a()` with ADK runner. | Corrupted/PII files intercepted and routed to DLQ topic. |
+| **Day 10**| AgentOps, Telemetry & Runtime | Cloud Trace (`OpenTelemetry`), Cloud Logging metrics (`agent_session_total_tokens`), Vertex AI Agent Engine deployment. | Token consumption & latency dashboards; concurrent load test. |
+
+---
+
+## 3. Core Modules: `/agent` (Agent Development Kit & LLM Ops)
 
 All agent code lives in `/agent`. Built with `google-adk` (`google.adk`), `google-genai`, Vertex AI, and Cloud SDKs.
 
-### 2.1 `agent/agent.py` - Primary Conversational Data Agent
+### 3.1 `agent/agent.py` - Primary Conversational Data Agent
 - **Agent Name**: `clinical_trials_data_agent`
-- **Model**: `gemini-3.8-flash` (via Vertex AI endpoint, configured via `GOOGLE_GENAI_USE_VERTEXAI=True`)
+- **Model**: `gemini-3.8-flash` (Vertex AI endpoint with `GOOGLE_GENAI_USE_VERTEXAI=True`, `GOOGLE_CLOUD_LOCATION="global"`).
 - **Role**: Conversational router handling natural language queries through two registered tools:
   - `execute_clinical_sql`: Analytical queries (counts, trial statuses, grouping by status, filtering by `nct_id`).
   - `search_clinical_protocols`: Semantic / conceptual queries (inclusion/exclusion criteria, endpoints, dosing, adverse events).
   - *Hybrid*: Executes SQL first to retrieve/filter `nct_id`s, then vector search to query protocol contents.
 
-### 2.2 `agent/tools.py` - ADK Function Tools
+### 3.2 `agent/tools.py` - ADK Function Tools
 - `execute_clinical_sql(sql_query: str) -> Dict[str, Any]`
   - Queries: Fully qualified BigQuery table `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}` (`studies_metadata`).
   - Columns: `nct_id`, `brief_title`, `overall_status`, `doc_filename`, `cdn_url`, `gcs_uri`.
   - Guardrail: Rejects queries not starting with `SELECT` or `WITH`. Caps results to 50 rows.
+  - Telemetry: Emits OpenTelemetry span and Cloud Logging telemetry for query execution latency and row counts.
 - `search_clinical_protocols(search_query: str, top_k: int = 5) -> Dict[str, Any]`
   - Queries: FastAPI RAG endpoint `POST {RAG_API_URL}` (`http://localhost:8080/search` or Cloud Run URL).
+  - Auth: Automatically attaches OIDC identity tokens using GCP Metadata Server (in Cloud Run / Agent Engine) or `gcloud auth print-identity-token` (in Cloud Shell).
   - Returns: Retrieved chunks with `nct_id`, `section_type`, `gcs_uri`, `chunk_text`, `cosine_similarity`.
+  - Telemetry: Emits OpenTelemetry span (`search_clinical_protocols`) and structured Cloud Logging telemetry for endpoint latency and chunk token metrics.
 
-### 2.3 `agent/governance_agent.py` - Agent-to-Agent (A2A) Governance & DLQ
+### 3.3 `agent/governance_agent.py` - Agent-to-Agent (A2A) Governance & DLQ
 - **Agent Name**: `clinical_trials_governance_agent` (Model: `gemini-3.8-flash`)
 - **Key Functions**:
   - `verify_ingestion_payload_a2a(payload: Dict[str, Any]) -> Dict[str, Any]`:
-    1. Fast deterministic pre-checks: validates `nct_id` regex (`^NCT\d{8}$`), `.pdf` extension, non-zero file size, and raw regex for SSN/PII.
-    2. LLM validation: Launches ADK runner to evaluate payload against Schema, File Integrity, and PII policies.
-    3. Output: JSON verdict `{"verdict": "APPROVED" | "REJECTED", "reason": "..."}`.
+    1. *Fast deterministic pre-checks*: validates `nct_id` regex (`^NCT\d{8}$`), `.pdf` extension, non-zero file size, and raw regex for SSN/PII.
+    2. *LLM validation*: Launches an ADK `Runner` to evaluate payload against Schema, File Integrity, and PII policies.
+    3. *Output*: Strict JSON verdict `{"verdict": "APPROVED" | "REJECTED", "reason": "..."}`.
   - `publish_to_dlq(payload: Dict[str, Any], reason: str) -> Optional[str]`:
     - Publishes rejected events to Cloud Pub/Sub DLQ topic (`DLQ_TOPIC_ID`, default: `clinical-trials-ingest-dlq`).
     - Emits structured error log: `🚨 [GOVERNANCE AGENT INTERCEPTED -> DLQ]`.
 
-### 2.4 `agent/guardrails.py` - Cloud DLP & Vertex Safety
+### 3.4 `agent/config.py` - Centralized Configuration
+- Immutable dataclass `Settings` providing single source of truth for all GCP project names, dataset IDs, model names, and endpoints.
+- Robust production defaults prevent accidental `"dummy-location"` or `"dummy-table"` failures during containerized or remote runtime execution.
+
+### 3.5 `agent/guardrails.py` - Cloud DLP & Vertex Safety
 - `redact_pii_dlp(text: str) -> Tuple[str, bool]`:
   - Uses Google Cloud DLP (`google.cloud.dlp_v2.DlpServiceClient`).
   - Target InfoTypes: `PERSON_NAME`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SOCIAL_SECURITY_NUMBER`, `US_HEALTHCARE_NPI`.
   - De-identifies text replacing matches with `[INFO_TYPE]`. Returns `(sanitized_text, pii_detected_bool)`.
 - `VERTEX_SAFETY_SETTINGS`: Configures `types.SafetySetting` for `HATE_SPEECH`, `DANGEROUS_CONTENT`, `SEXUALLY_EXPLICIT`, `HARASSMENT` at `BLOCK_MEDIUM_AND_ABOVE`.
 
-### 2.5 `agent/memory.py` - Firestore Session Memory
+### 3.6 `agent/memory.py` - Firestore Session Memory
 - `SessionMemory` class:
   - Short-term conversational state backed by Cloud Firestore (`FIRESTORE_COLLECTION`, default: `agent_sessions`).
-  - Methods:
-    - `add_turn(session_id, role, message)`: Appends turn to `history` array via `firestore.ArrayUnion`.
-    - `get_turns(session_id, limit=10) -> List[Dict]`: Retrieves last `N` turns.
+  - Methods: `add_turn(session_id, role, message)` and `get_turns(session_id, limit=10)`.
 
-### 2.6 `agent/telemetry.py` - FinOps & OpenTelemetry
+### 3.7 `agent/telemetry.py` - FinOps & OpenTelemetry
 - Tracer: OpenTelemetry `TracerProvider` with `CloudTraceSpanExporter` (`BatchSpanProcessor`).
-- Cloud Logging: Direct write to Cloud Logging via `gcp_logging.Client` -> `agent_telemetry_log`.
-- `log_agent_session_metrics(...)`:
-  - Emits JSON payload: `event_type="agent_execution_telemetry"`, `session_id`, `latency_ms`, `prompt_tokens`, `response_tokens`, `total_tokens`, `estimated_cost_usd` (Gemini Flash: $0.075/1M prompt, $0.30/1M response), `pii_intercepted`.
+- Structured Cloud Logging: Emits zero-latency JSON payloads directly to `sys.stdout` for Cloud Run and Cloud Logging log-based metrics:
+  - Metric 1: `agent_session_total_tokens` (distribution metric grouped by `session_id`).
+  - Metric 2: `agent_execution_latency_ms` (distribution metric capturing execution latency).
+  - FinOps Cost Formula: `(prompt_tokens * $0.000000075) + (response_tokens * $0.00000030)`.
 
 ---
 
-## 3. Core Modules: `/pipeline` (FastAPI Serving & Ingestion)
+## 4. Core Modules: `/pipeline` (FastAPI Serving & Ingestion)
 
 All API and serving logic lives in `/pipeline`.
 
-### 3.1 `pipeline/schemas.py` - Pydantic Contracts
-- `IngestRequest`: `nct_id` (str), `filename` (str), `doc_type` (str, default "Protocol").
-- `IngestResponse`: `ingestion_id` (UUID str), `nct_id`, `gcs_uri`, `status` ("QUEUED_ASYNC_EXTRACTION"), `timestamp` (datetime).
-- `MetadataResponse`: `nct_id`, `brief_title`, `overall_status`, `gcs_uri`, `extracted_sections_count` (int).
-- `SearchRequest`: `query` (str), `top_k` (int, 1-20, default 5), `session_id` (optional str).
-- `ChunkHit`: `nct_id`, `section_type`, `gcs_uri`, `chunk_text`, `cosine_similarity` (float).
-- `SearchResponse`: `query` (str), `results` (List[ChunkHit]).
-
-### 3.2 `pipeline/main.py` - Application Endpoints
+### 4.1 `pipeline/main.py` - Application Endpoints
 - Port: `8080`.
 - **`POST /v1/ingest`** (Status 202 Accepted):
   - Stages document URI `gs://{BUCKET_NAME}/raw/{nct_id}/{filename}`. Non-blocking acknowledgment for async upload.
 - **`GET /v1/metadata/{id}`**:
-  - Joins `{PROJECT_ID}.{DATASET_ID}.studies_metadata` with `{PROJECT_ID}.{DATASET_ID}.extracted_doc_chunks` on `nct_id`.
+  - Joins `studies_metadata` with `extracted_doc_chunks` on `nct_id`.
   - Returns metadata + total count of extracted sections.
 - **`POST /search`**:
-  1. Checks prompt with `redact_pii_dlp(req.query)`.
-  2. Embeds sanitized query in BigQuery using `ML.GENERATE_EMBEDDING` with `embedding_model` (`gemini-embedding-001`).
-  3. Executes BigQuery `VECTOR_SEARCH` over `embedded_doc_chunks` using `COSINE` distance. Calculates `cosine_similarity = ROUND(1.0 - distance, 4)`.
-  4. Wraps execution in OpenTelemetry span `semantic_vector_search`.
-  5. Emits FinOps telemetry via `log_agent_session_metrics`.
-- **`POST /v1/events/gcs-ingest`** (Eventarc / Pub/Sub Push Webhook):
-  1. Decodes incoming Pub/Sub push envelope or direct Eventarc CloudEvent.
-  2. Runs A2A verification via `verify_ingestion_payload_a2a()`.
-  3. If rejected: Returns 200/202 with `INTERCEPTED_ROUTED_TO_DLQ`.
-  4. If approved:
-     - Executes BigQuery `ML.GENERATE_TEXT` with `model_extractor` (`gemini-3.8-flash`) against `documents_table` for `@gcs_uri`.
-     - Extracts 5 structured sections: `Study Overview`, `Inclusion Criteria`, `Exclusion Criteria`, `Primary Endpoints`, `Dosing & Intervention`.
-     - Unnests JSON into `extracted_doc_chunks`.
-     - Executes BigQuery `ML.GENERATE_EMBEDDING` with `embedding_model` (`gemini-embedding-001`) into `embedded_doc_chunks`.
+  - Checks prompt with `redact_pii_dlp(req.query)`.
+  - Generates query embedding via BigQuery `ML.GENERATE_EMBEDDING` and runs `VECTOR_SEARCH` against `embedded_doc_chunks` with `COSINE` distance.
+  - Returns matching chunks with `cosine_similarity = ROUND(1.0 - distance, 4)`.
+  - Emits telemetry and OpenTelemetry spans.
+- **`POST /v1/events/gcs-ingest`** (Eventarc Webhook):
+  - Decodes incoming Pub/Sub push envelope or direct Eventarc CloudEvent.
+  - Executes A2A verification via `verify_ingestion_payload_a2a()`. If rejected, routes to DLQ and returns 200/202.
+  - Fetches study metadata from ClinicalTrials.gov API v2 and performs an idempotent BigQuery `MERGE` into `studies_metadata`.
+  - Executes incremental extraction and embedding queries via `pipeline/queries.py`.
+- **`POST /v1/chat`** (Agent Runtime Proxy):
+  - Connects to the deployed Vertex AI Agent Engine (`AGENT_ENGINE_RESOURCE_NAME`).
+  - Creates or resumes a managed session and streams tokens back to client.
+
+### 4.2 `pipeline/queries.py` - Modular BigQuery SQL Templates
+Contains dedicated, parameterized SQL builder functions with built-in idempotency:
+- `build_upsert_metadata_query()`: Uses `MERGE INTO studies_metadata` to insert or update trial records idempotently.
+- `build_incremental_extraction_query()`: Runs `ML.GENERATE_TEXT` with `SAFE.PARSE_JSON` and filters `WHERE gcs_uri NOT IN (SELECT gcs_uri FROM extracted_doc_chunks)`.
+- `build_incremental_embedding_query()`: Runs `ML.GENERATE_EMBEDDING` on un-embedded chunks into `embedded_doc_chunks`.
+- `build_semantic_search_query()`: Generates query embedding on-the-fly and executes `VECTOR_SEARCH`.
+- `build_metadata_query()`: Reads study metadata joined with chunk counts.
+
+### 4.3 `pipeline/metadata_service.py` - ClinicalTrials.gov API Integration
+- `fetch_study_metadata_or_fallback(nct_id, filename, gcs_uri)`:
+  - Queries `https://clinicaltrials.gov/api/v2/studies/{nct_id}`.
+  - Extracts official `briefTitle` and `overallStatus`.
+  - Generates deterministic fallback values if the external API is unreachable or rate-limited.
 
 ---
 
-## 4. Reference Components
+## 5. Deployment Architecture: Vertex AI Agent Engine (Agent Runtime)
 
-### 4.1 `/infra` - Infrastructure as Code & Scripts
-- `infra/bq_setup.sql`:
-  - Dataset `clinical_trials_2`.
-  - Tables: `studies_metadata`, external object table `documents_table` over `gs://.../raw/*` using connection `us.agentic_conn`.
-  - Remote models: `model_extractor` (`gemini-3.8-flash`), `embedding_model` (`gemini-embedding-001`).
-  - Target tables: `extracted_doc_chunks`, `embedded_doc_chunks` + IVF `COSINE` Vector Index `doc_chunks_cosine_idx`.
-- `infra/setup_day9_eventarc.sh`: Creates Pub/Sub topic `clinical-trials-ingest-topic`, DLQ `clinical-trials-ingest-dlq`, pull subscription, log metric `governance_dlq_routed_count`, and Eventarc GCS object finalized trigger routing to `/v1/events/gcs-ingest`.
-- `infra/logging_metrics.sh`: Configures Cloud Monitoring distribution metrics for `agent_session_total_tokens` (grouped by `session_id`) and `agent_execution_latency_ms`.
-- `infra/load_test_native.py` & `load_test_native.sh`: Zero-dependency multi-threaded load test for `/search` (p50, p90, p95, throughput). Supports Cloud Run IAM tokens.
-- `infra/deploy_cloud_run.sh`: Command to deploy `clinical-trials-rag-api` from source to Cloud Run in `us-central1`.
+The conversational ADK agent is deployed to **Vertex AI Agent Engine** (managed Reasoning Engine runtime):
 
-### 4.2 `/scripts` - Utilities & Verification
-- `scripts/fetch_sample_data.py`: Fetches studies from ClinicalTrials.gov API v2, downloads up to 20 protocol PDFs, stages in GCS (`raw/{nct_id}/{filename}`), and inserts rows into BigQuery `studies_metadata`.
-- `scripts/test_day8_agent.py`: ADK runner script testing intent routing (Analytical SQL vs. Semantic Search).
-- `scripts/test_day9_governance.py`: Tests 3 scenarios for A2A Governance (Valid PDF -> Approved, PII -> Rejected/DLQ, Corrupt -> Rejected/DLQ).
-- `scripts/final_challenge_test.py`: Comprehensive test runner covering all Days 6-10 acceptance criteria (local or against Cloud Run).
+### 5.1 Deployment Script (`scripts/deploy_agent_runtime.py`)
+- Uses modern template: `from vertexai.agent_engines import AdkApp`.
+- Wraps `root_agent` with OpenTelemetry tracing: `adk_app = AdkApp(agent=root_agent, enable_tracing=True)`.
+- Deploys via `agent_engines.create()` with:
+  - `service_account="80080086039-compute@developer.gserviceaccount.com"` (BYOSA).
+  - Explicit production `env_vars`: `LOCATION="global"`, `GOOGLE_CLOUD_LOCATION="global"`, `BQ_DATASET="clinical_trials_2"`, `BQ_TABLE="studies_metadata"`, `RAG_API_URL="..."`.
+  - Pinned requirements: `google-adk==2.12.0`, `google-cloud-aiplatform[agent_engines,adk]>=2.9.0`.
 
-### 4.3 `/docs` - Architecture & Decision Records
-- `docs/ARCHITECTURE.md`: High-level flowchart and unstructured-to-structured explanation.
-- `docs/ADR-001-agentic-ingestion.md`: Decisions on chunking strategy (semantic sectioning via LLM vs. naive character split), model choice (`gemini-3.8-flash`), schema evolution policy, and DLP.
+### 5.2 Virtual Environment & Deployment Contract
+- Vertex AI Agent Engine remote containers execute on managed Google Cloud infrastructure.
+- Deployment and testing scripts must be executed inside the project's primary virtual environment (`.venv`):
+- Deployment invocation:
+  ```bash
+  source .venv/bin/activate
+  python scripts/deploy_agent_runtime.py
+  # or directly:
+  ./.venv/bin/python scripts/deploy_agent_runtime.py
+  ```
 
----
-
-## 5. Configuration & Environment Variables Contract
-
-All variables are loaded via `.env` with fallback dummy values when unset:
-
-| Variable | Default Fallback | Purpose / Production Example |
-| :--- | :--- | :--- |
-| `PROJECT_ID` / `GCP_PROJECT` | `"dummy-project-id"` | GCP Project ID (`data4ai-challenge-03`) |
-| `LOCATION` / `GCP_LOCATION` | `"dummy-location"` | Vertex AI / Cloud Region (`global` or `us-central1`) |
-| `DATASET_ID` / `BQ_DATASET` | `"dummy_dataset_id"` | BigQuery dataset (`clinical_trials_2`) |
-| `TABLE_ID` / `BQ_TABLE` | `"dummy_table_id"` | Metadata table (`studies_metadata`) |
-| `BUCKET_NAME` / `GCS_BUCKET` | `"dummy-bucket-name"` | GCS raw bucket name |
-| `MODEL_NAME` / `AGENT_MODEL` | `"dummy-model-name"` | Gemini model (`gemini-3.8-flash`) |
-| `GOOGLE_GENAI_USE_VERTEXAI` | `"dummy-vertexai-flag"` | Enable Vertex backend in ADK (`True`) |
-| `DLQ_TOPIC_ID` / `DWL_TOPIC_ID`| `"dummy-dlq-topic-id"` | Pub/Sub Dead-Letter Queue topic |
-| `RAG_API_URL` | `"http://dummy-rag-api-url/search"` | Vector search endpoint URL |
-| `FIRESTORE_COLLECTION` | `"dummy-agent-sessions"`| Firestore collection name (`agent_sessions`) |
-| `EMBEDDING_MODEL` | `"dummy_embedding_model"`| BigQuery model (`embedding_model`) |
-| `EXTRACTOR_MODEL` | `"dummy_model_extractor"`| BigQuery model (`model_extractor`) |
+### 5.3 Testing Agent Engine (`scripts/test_agent_runtime.py`)
+```bash
+export AGENT_ENGINE_RESOURCE_NAME="projects/80080086039/locations/us-central1/reasoningEngines/<RESOURCE_ID>"
+./.venv/bin/python scripts/test_agent_runtime.py
+```
 
 ---
 
@@ -189,6 +204,7 @@ All variables are loaded via `.env` with fallback dummy values when unset:
 
 1. **Always Preserve Read-Only Safety**: `execute_clinical_sql` must remain restricted to `SELECT` and `WITH` statements.
 2. **Deterministic Pre-Checks Before LLM**: In `agent/governance_agent.py`, regex checks (`NCT\d{8}`, file size, obvious SSN patterns) must run before calling ADK runner to conserve tokens and minimize latency.
-3. **Escaping Inside BigQuery F-strings**: In `pipeline/main.py`, SQL blocks inside Python f-strings must escape JSON braces as `{{` and `}}` and regex slashes as `\\d{{8}}`.
+3. **Escaping Inside BigQuery F-strings**: In `pipeline/queries.py`, SQL blocks inside Python strings must format unescaped regex (`\d{8}`) cleanly without breaking string interpolation.
 4. **Cloud Run Concurrency**: The `/search` endpoint is stateless; state is maintained in Firestore (`agent_sessions`) and BigQuery. Do not store in-memory session dictionaries.
-5. **FinOps & Telemetry**: When adding or modifying endpoints, maintain the `log_agent_session_metrics` call to ensure Cloud Logging metrics and dashboard charts stay synchronized.
+5. **FinOps & Telemetry Invariant**: Every tool execution and user chat request must emit structured Cloud Logging JSON metrics with `session_id`, `latency_ms`, `total_tokens`, and `estimated_cost_usd` to ensure Cloud Monitoring dashboards stay populated.
+6. **Virtual Environment Standard**: Execute all local verification, pipeline runs, and deployment tasks within the project's active `.venv` environment.

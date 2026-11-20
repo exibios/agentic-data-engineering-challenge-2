@@ -317,6 +317,7 @@ def chat_with_agent_runtime(req: ChatRequest):
         status_code=500, detail="AGENT_ENGINE_RESOURCE_NAME env var not set."
     )
 
+  start_time = time.time()
   vertexai.init(project=settings.PROJECT_ID, location=settings.REGION)
   remote_agent = agent_engines.get(settings.AGENT_ENGINE_ID)
 
@@ -337,8 +338,23 @@ def chat_with_agent_runtime(req: ChatRequest):
       if "text" in part:
         final_answer.append(part["text"])
 
+  full_response = "".join(final_answer)
+  latency_ms = (time.time() - start_time) * 1000.0
+  approx_prompt_tokens = len(req.prompt.split()) * 2
+  approx_response_tokens = len(full_response.split()) * 2
+
+  log_agent_session_metrics(
+      session_id=session_id,
+      user_prompt=req.prompt,
+      tool_selected="agent_engine_runtime",
+      latency_ms=latency_ms,
+      prompt_tokens=approx_prompt_tokens,
+      response_tokens=approx_response_tokens,
+      pii_intercepted=False,
+  )
+
   return {
       "session_id": session_id,
       "prompt": req.prompt,
-      "response": "".join(final_answer),
+      "response": full_response,
   }

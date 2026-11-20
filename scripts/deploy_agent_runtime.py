@@ -19,8 +19,8 @@ from agent.agent import root_agent
 PROJECT_ID = "data4ai-challenge-03"
 DEPLOY_REGION = "us-central1"  # Agent Engine hosting region
 STAGING_BUCKET = "gs://data4ai-challenge-03-agentic-data-engineering-raw-docs-2-stg"
-#SERVICE_ACCOUNT = "80080086039-compute@developer.gserviceaccount.com"
-SERVICE_ACCOUNT = "clinical-agent-sa@data4ai-challenge-03.iam.gserviceaccount.com"
+SERVICE_ACCOUNT = "80080086039-compute@developer.gserviceaccount.com"
+#SERVICE_ACCOUNT = "clinical-agent-sa@data4ai-challenge-03.iam.gserviceaccount.com"
 CLOUD_RUN_RAG_URL = "https://clinical-trials-rag-api-xqvchgmmha-uc.a.run.app/search"
 
 
@@ -59,19 +59,31 @@ def main():
           "opentelemetry-api>=1.24.0",
           "opentelemetry-sdk>=1.24.0",
           "opentelemetry-exporter-gcp-trace>=1.7.0",
+          "opentelemetry-exporter-otlp-proto-http>=1.24.0",
           "google-cloud-logging>=3.10.0",
           "google-cloud-dlp>=3.40.0",
           "google-cloud-aiplatform[agent_engines,adk]>=2.9.0",
-        ],
+          "opentelemetry-instrumentation-google-genai",
+          "opentelemetry-instrumentation-httpx",
+          "opentelemetry-instrumentation-grpc",
+      ],
       extra_packages=["./agent"],
       env_vars={
+          "PROJECT_ID": PROJECT_ID,
           "GCP_PROJECT": PROJECT_ID,
-          "BQ_DATASET": "clinical_trials_2",
-          "RAG_API_URL": CLOUD_RUN_RAG_URL,
-          # Keep Gemini 3.8 Flash model inference routed through the 'global' endpoint
+          "LOCATION": "global",
+          "GCP_LOCATION": "global",
+          "GOOGLE_CLOUD_LOCATION": "global",
           "GEMINI_MODEL_LOCATION": "global",
+          "GOOGLE_GENAI_USE_VERTEXAI": "True",
+          "BQ_DATASET": "clinical_trials_2",
+          "DATASET_ID": "clinical_trials_2",
+          "BQ_TABLE": "studies_metadata",
+          "TABLE_ID": "studies_metadata",
+          "RAG_API_URL": CLOUD_RUN_RAG_URL,
           "AGENT_MODEL": "gemini-3.8-flash",
-          "LOCATION": "global"
+          "MODEL_NAME": "gemini-3.8-flash",
+          "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY": "true",
       },
   )
 

@@ -4,274 +4,107 @@
 
 ---
 
-## Part 1: Simple Best Practice Refactorings (Immediate / Low Effort)
+## Part 1: Implemented Improvements (Production Hardened)
 
-These refactorings eliminate technical debt and subtle bugs without introducing complex design patterns or heavy abstractions.
+The following refactorings have been fully implemented and verified in the codebase:
 
----
+### 1. Centralized Environment Configuration (`agent/config.py`)
+- **Status:** ✅ **COMPLETED**
+- **Changes**: Created an immutable `Settings` dataclass in [`agent/config.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/agent/config.py). Replaced ad-hoc `load_dotenv()` and brittle `dummy-location` defaults across 7+ modules with production defaults (`LOCATION="global"`, `DATASET_ID="clinical_trials_2"`, `TABLE_ID="studies_metadata"`).
+- **Benefit**: Eliminated repeated boilerplate and prevented 404 endpoint routing errors during Vertex AI Agent Runtime initialization.
 
-### 1. Centralize Environment Configuration (`agent/config.py`)
+### 2. Non-Blocking Event Loop in FastAPI (`asyncio.to_thread`)
+- **Status:** ✅ **COMPLETED**
+- **Changes**: In [`pipeline/main.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/pipeline/main.py), wrapped all synchronous BigQuery execution calls (`_run_query`, `_execute_incremental_ingest`) inside Python standard `asyncio.to_thread()`.
+- **Benefit**: Prevents long-running BigQuery jobs from blocking FastAPI's async event loop, ensuring high throughput during concurrent load tests on `/search` and `/v1/events/gcs-ingest`.
 
-#### Problem
-Currently, 7+ files (`pipeline/main.py`, `agent/agent.py`, `agent/tools.py`, `agent/governance_agent.py`, `agent/guardrails.py`, `agent/memory.py`, `agent/telemetry.py`) independently duplicate:
-- `load_dotenv()` inside `try/except`
-- Repeated fallback cascades (`os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"`)
-- Out-of-sync variable defaults (e.g., `agent/guardrails.py` uses `"data4ai-challenge-03"` directly while others use `"dummy-project-id"`).
+### 3. Modular SQL Template Extraction (`pipeline/queries.py`)
+- **Status:** ✅ **COMPLETED**
+- **Changes**: Extracted all multi-line BigQuery queries from `pipeline/main.py` into [`pipeline/queries.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/pipeline/queries.py).
+- **Benefit**: Removed escaped curly braces (`{{` / `}}`) and complex regex escaping from application code. Kept `pipeline/main.py` lean, readable, and testable.
 
-#### Solution: Single 30-Line Config Module
-Create a lightweight configuration module:
+### 4. Idempotent Ingestion & BigQuery Deduplication
+- **Status:** ✅ **COMPLETED**
+- **Changes**:
+  - Implemented `build_upsert_metadata_query()` using BigQuery `MERGE INTO studies_metadata` to handle re-uploaded files without duplicate rows.
+  - Implemented incremental extraction in `build_incremental_extraction_query()` filtering `WHERE gcs_uri NOT IN (SELECT gcs_uri FROM extracted_doc_chunks)`.
+  - Added ClinicalTrials.gov API v2 metadata resolution in [`pipeline/metadata_service.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/pipeline/metadata_service.py).
+- **Benefit**: Safe re-triggering of Eventarc events without data corruption or duplicate embeddings.
 
-```python
-# agent/config.py
-import os
-from dataclasses import dataclass
+### 5. Lazy GCP Client Instantiation with LRU Caching (`agent/clients.py`)
+- **Status:** ✅ **COMPLETED**
+- **Changes**: Consolidated `bigquery.Client()`, `firestore.Client()`, `dlp_v2.DlpServiceClient()`, and `pubsub_v1.PublisherClient()` into cached getter functions using `@lru_cache(maxsize=1)` in [`agent/clients.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/agent/clients.py).
+- **Benefit**: Fast imports, zero top-level network connections at startup, and effortless unit testing without complex module patching.
 
-try:
-  from dotenv import load_dotenv
-  load_dotenv()
-except ImportError:
-  pass
-
-@dataclass(frozen=True)
-class Settings:
-  # GCP & Region
-  PROJECT_ID: str = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT") or "dummy-project-id"
-  LOCATION: str = os.getenv("LOCATION") or os.getenv("GCP_LOCATION") or "dummy-location"
-  
-  # BigQuery & Storage
-  DATASET_ID: str = os.getenv("DATASET_ID") or os.getenv("BQ_DATASET") or "dummy_dataset_id"
-  TABLE_ID: str = os.getenv("TABLE_ID") or os.getenv("BQ_TABLE") or "dummy_table_id"
-  BUCKET_NAME: str = os.getenv("BUCKET_NAME") or os.getenv("GCS_BUCKET") or "dummy-bucket-name"
-  
-  # Models & Endpoints
-  MODEL_NAME: str = os.getenv("MODEL_NAME") or os.getenv("AGENT_MODEL") or "dummy-model-name"
-  EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "dummy_embedding_model")
-  EXTRACTOR_MODEL: str = os.getenv("EXTRACTOR_MODEL", "dummy_model_extractor")
-  RAG_API_URL: str = os.getenv("RAG_API_URL", "http://dummy-rag-api-url/search")
-  
-  # Pub/Sub & DLQ
-  DLQ_TOPIC_ID: str = os.getenv("DLQ_TOPIC_ID") or os.getenv("DWL_TOPIC_ID") or "dummy-dlq-topic-id"
-  FIRESTORE_COLLECTION: str = os.getenv("FIRESTORE_COLLECTION", "dummy-agent-sessions")
-  GOOGLE_GENAI_USE_VERTEXAI: str = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "dummy-vertexai-flag")
-
-settings = Settings()
-```
-
-#### Benefit
-- Removes over 60 lines of repeated boilerplate across the repository.
-- Single source of truth: updating a variable name or dummy default happens in exactly one place.
+### 6. Zero-Latency Cloud Logging Telemetry (`agent/telemetry.py`)
+- **Status:** ✅ **COMPLETED**
+- **Changes**: Standardized `log_agent_session_metrics()` to stream structured JSON payloads directly to `sys.stdout`.
+- **Benefit**: Completely eliminates the 50–150 ms synchronous HTTP POST to `logging.googleapis.com`. Cloud Run and Agent Runtime automatically parse stdout JSON into Cloud Logging `jsonPayload`, directly triggering the Day 10 Cloud Monitoring distribution metrics.
 
 ---
 
-### 2. Prevent Event Loop Blocking in FastAPI (`asyncio.to_thread`)
-
-#### Problem
-In `pipeline/main.py`, both `POST /search` and `POST /v1/events/gcs-ingest` are declared as `async def`, but they call synchronous, blocking BigQuery methods:
-```python
-rows = list(bq_client.query(sql, job_config=job_config).result())
-```
-In an async event loop, blocking on `.result()` halts the entire worker thread for 1.5–3.0 seconds, drastically degrading throughput during concurrent load tests.
-
-#### Solution: Run Synchronous Query in a Worker Thread
-Use standard Python `asyncio.to_thread`:
-
-```python
-# pipeline/main.py
-import asyncio
-
-def _run_query(query_sql: str, config: bigquery.QueryJobConfig):
-  return list(bq_client.query(query_sql, job_config=config).result())
-
-# Inside async def semantic_search(...):
-rows = await asyncio.to_thread(_run_query, sql, job_config)
-```
-
-#### Benefit
-- Unblocks FastAPI to handle concurrent incoming requests while BigQuery processes the query in GCP.
-- Increases `/search` concurrent throughput with zero third-party dependencies.
+## Part 2: Next Architectural Evolutions & ADK Enhancements
 
 ---
 
-### 3. Extract Multi-Line SQL Queries (`pipeline/queries.py`)
+### 1. Maximize ADK Multi-Agent Capabilities (Tool-Equipped Governance)
+- **Current State**: In [`agent/governance_agent.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/agent/governance_agent.py), deterministic regex checks and DLP redaction run imperatively in Python before calling the LLM. The Governance Agent is invoked as a simple text-in-text-out prompt reviewer.
+- **Architectural Evolution**:
+  - Equip `clinical_trials_governance_agent` with native ADK tools:
+    1. `inspect_schema_tool(table_name: str, proposed_columns: List[str])`: Introspects BigQuery INFORMATION_SCHEMA to detect breaking schema mutations.
+    2. `scan_pii_dlp_tool(text_sample: str)`: Invokes Cloud DLP to classify and score sensitive patient identifiers.
+    3. `inspect_dlq_depth_tool()`: Checks Pub/Sub DLQ backlog.
+  - Let the Governance Agent dynamically reason about which verification tool to invoke based on file metadata.
+- **Benefit**: Showcases genuine multi-agent autonomy and satisfies soft criteria on agent reasoning vs. hardcoded scripts.
 
-#### Problem
-In `pipeline/main.py`, the Eventarc ingestion endpoint contains ~120 lines of SQL embedded directly inside an f-string, requiring awkward escaping:
-- `REGEXP_EXTRACT(uri, r'NCT\\d{{8}}')`
-- `{{"section_type": "Study Overview"}}`
+### 2. End-to-End Agent Runtime Telemetry Hooks
+- **Current State**: Telemetry logging (`log_agent_session_metrics`) is currently triggered in `pipeline/main.py` (`POST /search`). When `root_agent` executes queries in Vertex AI Agent Runtime (e.g., analytical SQL via `execute_clinical_sql`), custom token metrics are not captured into Cloud Logging.
+- **Architectural Evolution**:
+  - Instrument `execute_clinical_sql` in [`agent/tools.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/agent/tools.py) to calculate query latency and emit structured execution telemetry.
+  - Instrument `POST /v1/chat` in [`pipeline/main.py`](file:///usr/local/google/home/cfrancoisrael/repos/agentic-data-engineering-challenge-2/pipeline/main.py) to measure `remote_agent.stream_query()` turn latency and log estimated input/output tokens per user session.
+- **Benefit**: Ensures 100% of agent interactions (analytical SQL + semantic search + chat proxy) populate the Day 10 Cloud Monitoring dashboards.
 
-Any SQL modification risks breaking Python syntax or escaping rules.
+### 3. Automated DLQ Replay & Alerting Worker
+- **Current State**: Rejected payloads land in `clinical-trials-ingest-dlq`. Operations teams must manually pull messages using `gcloud pubsub subscriptions pull`.
+- **Architectural Evolution**:
+  - Deploy a Cloud Run Job or Cloud Function subscriber that reads dead-lettered messages, formats error summaries, and pushes alerts to Slack or Cloud Monitoring.
+  - Provide an administrative replay endpoint `POST /v1/dlq/replay` allowing operations engineers to re-queue resolved documents after schema updates or patient data redaction.
 
-#### Solution: Dedicated SQL Template Constants
-Move the SQL queries to `pipeline/queries.py`:
+### 4. Hybrid Search: Dense Vector + BigQuery BM25 Full-Text Search
+- **Current State**: `/search` relies exclusively on vector embeddings via `ML.GENERATE_EMBEDDING` and `VECTOR_SEARCH`.
+- **Limitation**: Dense embeddings can occasionally lose precision when querying exact pharmaceutical trial identifiers, investigational drug codes (e.g., "MK-3475", "NCT04001234"), or specific gene mutations ("EGFR T790M").
+- **Architectural Evolution**:
+  - Implement Reciprocal Rank Fusion (RRF) in BigQuery by combining `VECTOR_SEARCH` with BigQuery text search `SEARCH(chunk_text, @query_text)`:
+    $$\text{RRF Score} = \frac{1}{60 + \text{rank}_{\text{vector}}} + \frac{1}{60 + \text{rank}_{\text{keyword}}}$$
+- **Benefit**: Delivers state-of-the-art semantic comprehension while preserving 100% precision on exact clinical codes.
 
-```python
-# pipeline/queries.py
-
-INCREMENTAL_EXTRACTION_SQL = """
-INSERT INTO `{project_id}.{dataset_id}.extracted_doc_chunks`
-  (chunk_id, nct_id, gcs_uri, section_type, chunk_text, created_at)
-WITH raw_llm_extraction AS (
-  SELECT
-    uri AS gcs_uri,
-    REGEXP_EXTRACT(uri, r'NCT\d{8}') AS nct_id,
-    ml_generate_text_llm_result AS raw_response,
-    SAFE.PARSE_JSON(
-      REGEXP_REPLACE(
-        REGEXP_REPLACE(TRIM(ml_generate_text_llm_result), r'^```(?:json)?\s*', ''),
-        r'\s*```$', ''
-      )
-    ) AS parsed_json
-  FROM
-    ML.GENERATE_TEXT(...)
-...
-"""
-```
-
-In `pipeline/main.py`:
-```python
-sql = INCREMENTAL_EXTRACTION_SQL.format(
-    project_id=settings.PROJECT_ID,
-    dataset_id=settings.DATASET_ID,
-    extractor_model=settings.EXTRACTOR_MODEL,
-)
-```
-
-#### Benefit
-- Raw regex (`\d{8}`) and JSON syntax (`{"key": "value"}`) remain natural and unescaped.
-- Makes `pipeline/main.py` 150+ lines shorter and easier to navigate.
-
----
-
-### 4. Direct Cloud Logging Optimization (Zero-Latency Standard Output)
-
-#### Problem
-In `agent/telemetry.py`:
-```python
-gcp_logger = logging_client.logger("agent_telemetry_log")
-gcp_logger.log_struct(structured_payload, severity="INFO")
-```
-Every invocation makes an explicit network round-trip HTTP POST to Google Cloud Logging API (`logging.googleapis.com`), adding unnecessary latency (50–150 ms) to `/search`.
-
-#### Solution: Standard Cloud Run JSON Logging
-Google Cloud Run and Google Kubernetes Engine natively parse any JSON object written to `sys.stdout` into structured Cloud Logging `jsonPayload` automatically:
-
-```python
-# agent/telemetry.py
-import json
-import sys
-
-def log_agent_session_metrics(...):
-  structured_payload = {
-      "severity": "INFO",
-      "message": f"Telemetry emitted for session {session_id}",
-      "event_type": "agent_execution_telemetry",
-      "session_id": session_id,
-      "latency_ms": round(latency_ms, 2),
-      "prompt_tokens": prompt_tokens,
-      "response_tokens": response_tokens,
-      "total_tokens": prompt_tokens + response_tokens,
-      "estimated_cost_usd": round(estimated_cost_usd, 6),
-      "pii_intercepted": pii_intercepted,
-  }
-  print(json.dumps(structured_payload), file=sys.stdout, flush=True)
-```
-
-#### Benefit
-- Cuts 50–150 ms per request off `/search`.
-- Works identically locally and in Cloud Run.
-- Cloud Logging Metrics and Dashboards continue to parse `jsonPayload.total_tokens` and `jsonPayload.session_id` without changes.
-
----
-
-### 5. Lazy GCP Client Instantiation
-
-#### Problem
-`bigquery.Client()`, `dlp_v2.DlpServiceClient()`, and `firestore.Client()` are instantiated at the top level of module imports. When running unit tests, linting, or importing schemas, connection attempts to GCP occur immediately, causing crashes or slowdowns when credentials are missing or mocked.
-
-#### Solution: Simple Cached Getters or Properties
-```python
-# agent/clients.py
-from functools import lru_cache
-from google.cloud import bigquery, firestore, dlp_v2
-from agent.config import settings
-
-@lru_cache(maxsize=1)
-def get_bq_client():
-  return bigquery.Client(project=settings.PROJECT_ID)
-
-@lru_cache(maxsize=1)
-def get_firestore_client():
-  return firestore.Client(project=settings.PROJECT_ID)
-
-@lru_cache(maxsize=1)
-def get_dlp_client():
-  return dlp_v2.DlpServiceClient()
-```
-
-#### Benefit
-- Clients are created on first use, speeding up imports and making unit tests effortless without mock patching at module load time.
-
----
-
-## Part 2: Suggestions & Architectural Evolution (Future Milestones)
-
----
-
-### 1. Automated DLQ Replay & Alerting Worker
-- **Current State**: Payloads rejected by the Governance Agent are routed to `clinical-trials-ingest-dlq`. The engineer must run manual `gcloud pubsub subscriptions pull` to inspect rejections.
-- **Evolution**:
-  - Deploy a Cloud Run Job or Eventarc-triggered Cloud Function listening to `clinical-trials-ingest-dlq-sub`.
-  - Push formatted alert cards to Slack / Teams with rejection reasons and NCTId.
-  - Provide an endpoint `/v1/dlq/replay` that allows authorized admins to re-queue corrected documents after updating schemas or redacting sensitive records.
-
-### 2. Hybrid Search: Dense Vector + BigQuery Full-Text Search
-- **Current State**: `/search` relies strictly on vector cosine similarity via `ML.GENERATE_EMBEDDING`.
-- **Limitation**: Pure vector search can struggle on exact pharmaceutical drug codes (e.g., "MK-3475", "NCT04001234", or specific genetic markers like "EGFR T790M").
-- **Evolution**:
-  - Implement Reciprocal Rank Fusion (RRF) in BigQuery:
-    ```sql
-    -- Combine VECTOR_SEARCH with BigQuery text search
-    WITH vector_hits AS (...),
-         keyword_hits AS (
-           SELECT chunk_id, SCORE(chunk_text) AS bm25_score
-           FROM `clinical_trials_2.extracted_doc_chunks`
-           WHERE SEARCH(chunk_text, @query_text)
-         )
-    -- Reciprocal Rank Fusion score: 1 / (60 + rank_vec) + 1 / (60 + rank_kw)
-    ```
-  - Yields high semantic comprehension while preserving 100% precision on exact medical terminology.
-
-### 3. Agent Evaluation & Continuous RAG Benchmarking (CI/CD)
+### 5. Automated RAG Evaluation CI/CD Benchmark
 - **Current State**: `scripts/final_challenge_test.py` validates technical execution (HTTP status codes, tool selection).
-- **Evolution**:
-  - Integrate a lightweight automated RAG evaluation framework (e.g., RAGAS or synthetic test generation).
+- **Architectural Evolution**:
+  - Integrate an automated RAG evaluation framework (e.g., RAGAS) into CI/CD.
   - Measure 3 core metrics on pull requests:
-    1. **Faithfulness**: Is the agent response grounded strictly in retrieved chunks?
-    2. **Answer Relevance**: Did the agent directly answer the clinical question?
-    3. **Context Recall**: Did vector search find the correct inclusion/exclusion section?
-  - Run automatically in GitHub Actions on every pull request.
+    1. **Faithfulness**: Is the response strictly grounded in retrieved document chunks?
+    2. **Answer Relevance**: Did the agent directly answer the user's clinical question?
+    3. **Context Recall**: Did vector search retrieve the required protocol section?
 
-### 4. Infrastructure as Code (Terraform)
-- **Current State**: Infrastructure is created via manual bash scripts (`setup_day9_eventarc.sh`, `logging_metrics.sh`, `deploy_cloud_run.sh`).
-- **Evolution**:
-  - Consolidate into a single Terraform directory (`infra/terraform/`):
-    - `google_bigquery_dataset`, `google_bigquery_table`
-    - `google_pubsub_topic` (ingest + DLQ)
-    - `google_cloud_run_v2_service`
-    - `google_eventarc_trigger`
-    - `google_logging_metric`
-  - Eliminates drift and enables reproducible multi-environment deployments (`staging` vs. `production`).
+### 6. Infrastructure as Code (Terraform)
+- **Current State**: Cloud resources are configured via shell scripts (`setup_day9_eventarc.sh`, `logging_metrics.sh`, `deploy_cloud_run.sh`).
+- **Architectural Evolution**:
+  - Consolidate all infrastructure into declarative Terraform modules:
+    - BigQuery dataset, tables, object table, and vector index.
+    - Cloud Pub/Sub ingest and DLQ topics + dead-letter subscriptions.
+    - Cloud Run service and Eventarc triggers.
+    - Cloud Monitoring log-based metrics and alert policies.
 
 ---
 
 ## Summary Matrix: Prioritization Guide
 
-| Initiative | Effort | Impact | Risk | Recommended Next Step |
+| Initiative | Effort | Impact | Risk | Recommended Timing |
 | :--- | :---: | :---: | :---: | :--- |
-| **1. Centralized Config (`agent/config.py`)** | Low (30 min) | High | Minimal | Immediate implementation |
-| **2. Async BigQuery (`asyncio.to_thread`)** | Low (15 min) | High | Minimal | Immediate implementation |
-| **3. Extract SQL Queries (`queries.py`)** | Low (30 min) | Medium | Minimal | Immediate implementation |
-| **4. Cloud Run Stdout Logging** | Low (20 min) | Medium | Minimal | Immediate implementation |
-| **5. Hybrid Search (Vector + BM25)** | Medium (1 day) | High | Low | Next feature sprint |
-| **6. Automated DLQ Replay Worker** | Medium (1 day) | Medium | Low | Post-launch operations |
-| **7. Terraform IaC Migration** | Medium (1 day) | High | Low | Platform stabilization |
+| **1. Agent Runtime Telemetry Hooks** | Low (30 min) | Critical | Minimal | Immediate (Day 10 Alignment) |
+| **2. ADK Tool-Equipped Governance** | Medium (2 hrs) | High | Minimal | Sprint 2 (ADK Proficiency) |
+| **3. Automated DLQ Replay Worker** | Medium (1 day) | Medium | Low | Post-launch operations |
+| **4. Hybrid Search (Vector + BM25)** | Medium (1 day) | High | Low | Next feature sprint |
+| **5. Automated RAG Benchmark CI/CD** | Medium (1 day) | High | Low | Post-launch quality gate |
+| **6. Terraform IaC Migration** | Medium (1 day) | High | Low | Platform stabilization |

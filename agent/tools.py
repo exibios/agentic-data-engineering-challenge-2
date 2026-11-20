@@ -10,7 +10,10 @@ import httpx
 
 from agent.clients import get_bq_client
 from agent.config import settings
+from agent.telemetry import get_active_conversation_id, log_agent_session_metrics
+from opentelemetry import trace
 import os
+import time
 
 # Configure visible console logging for Day 8 Acceptance Criteria
 logging.basicConfig(
@@ -115,6 +118,7 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
       "🎯 [ADK ROUTING LOG] -> Selected Tool: SQL Execution Tool"
       " (Analytical Intent)"
   )
+  start_time = time.time()
   resolved_sql = sql_query.replace(
       "{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}", FULL_TABLE_ID
   )
@@ -133,12 +137,35 @@ def execute_clinical_sql(sql_query: str) -> Dict[str, Any]:
     query_job = bq_client.query(resolved_sql)
     rows = [dict(row) for row in query_job.result()]
     logger.info(f"✅ SQL Tool returned {len(rows)} rows.")
+
+    latency_ms = (time.time() - start_time) * 1000.0
+    approx_prompt_tokens = len(resolved_sql.split()) * 2
+    capped_rows = rows[:50]
+    approx_response_tokens = len(str(capped_rows).split())
+
+    # Attach metrics to ambient ADK execute_tool span to preserve gen_ai.conversation.id
+    current_span = trace.get_current_span()
+    if current_span and current_span.is_recording():
+      current_span.set_attribute("clinical.row_count", len(rows))
+      current_span.set_attribute("clinical.latency_ms", latency_ms)
+
+    session_id = get_active_conversation_id()
+    log_agent_session_metrics(
+        session_id=session_id,
+        user_prompt=resolved_sql,
+        tool_selected="execute_clinical_sql",
+        latency_ms=latency_ms,
+        prompt_tokens=approx_prompt_tokens,
+        response_tokens=approx_response_tokens,
+        pii_intercepted=False,
+    )
+
     return {
         "status": "success",
         "tool_used": "execute_clinical_sql",
         "executed_sql": resolved_sql,
         "row_count": len(rows),
-        "rows": rows[:50],  # Cap output to protect prompt context length
+        "rows": capped_rows,  # Cap output to protect prompt context length
     }
   except Exception as e:
     logger.error(f"❌ SQL execution failed: {e}")
@@ -162,6 +189,7 @@ def search_clinical_protocols(
       A dictionary containing the top matching document chunks and cosine
       similarity scores.
   """
+  start_time = time.time()
   logger.info(
       "🔍 [ADK ROUTING LOG] -> Selected Tool: Vector Search Tool"
       " (Semantic/Conceptual Intent)"
@@ -172,6 +200,7 @@ def search_clinical_protocols(
   )
 
   headers = _get_bearer_headers(search_url)
+  session_id = get_active_conversation_id()
 
   try:
     with httpx.Client(timeout=30.0) as client:
@@ -180,7 +209,7 @@ def search_clinical_protocols(
           json={
               "query": search_query,
               "top_k": top_k,
-              "session_id": "adk-agent-session",
+              "session_id": session_id,
           },
           headers=headers,
       )
@@ -189,6 +218,29 @@ def search_clinical_protocols(
 
     results: List[Dict[str, Any]] = data.get("results", [])
     logger.info(f"✅ Vector Search Tool retrieved {len(results)} chunks.")
+
+    latency_ms = (time.time() - start_time) * 1000.0
+    approx_prompt_tokens = len(search_query.split()) * 2
+    approx_response_tokens = sum(
+        len(str(r.get("chunk_text", "")).split()) for r in results
+    )
+
+    # Attach metrics to ambient ADK execute_tool span to preserve gen_ai.conversation.id
+    current_span = trace.get_current_span()
+    if current_span and current_span.is_recording():
+      current_span.set_attribute("clinical.chunks_retrieved", len(results))
+      current_span.set_attribute("clinical.latency_ms", latency_ms)
+
+    log_agent_session_metrics(
+        session_id=session_id,
+        user_prompt=search_query,
+        tool_selected="search_clinical_protocols",
+        latency_ms=latency_ms,
+        prompt_tokens=approx_prompt_tokens,
+        response_tokens=approx_response_tokens,
+        pii_intercepted=False,
+    )
+
     return {
         "status": "success",
         "tool_used": "search_clinical_protocols",
