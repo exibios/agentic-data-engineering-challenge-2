@@ -3,7 +3,11 @@ import os
 from google.adk.agents import Agent
 from google.genai import types
 from agent.config import settings
-from agent.tools import execute_clinical_sql, search_clinical_protocols
+from agent.tools import (
+    execute_clinical_sql,
+    search_clinical_protocols,
+    get_governance_verdict,
+)
 from agent.governance_agent import governance_agent
 from agent.callbacks import (
     pii_guardrail_before_model,
@@ -43,8 +47,9 @@ You have access to two specialized tools AND a Governance sub-agent. Route every
 3. HYBRID INTENT:
    - If a question requires both filtering by trial status and reading protocol details, call `execute_clinical_sql` first, then `search_clinical_protocols`.
 
-4. GOVERNANCE / COMPLIANCE INTENT -> Delegate to `clinical_trials_governance_agent`:
-   - Use when asked to validate a document, check schema compliance, verify PII/PHI policies, or audit an ingestion payload.
+4. GOVERNANCE / COMPLIANCE INTENT:
+   - Call `get_governance_verdict` to check if a specific clinical trial (NCT ID) was evaluated, approved, or rejected by governance.
+   - Delegate to `clinical_trials_governance_agent` when asked to perform real-time verification of a document schema, inspect PII/PHI policies, or audit an ingestion payload.
    - The Governance Agent has specialized tools for schema validation, PII inspection, and file integrity checks.
 
 RESPONSE GUIDELINES:
@@ -63,7 +68,7 @@ root_agent = Agent(
         " Governance sub-agent for schema/PII/compliance validation."
     ),
     instruction=SYSTEM_INSTRUCTION,
-    tools=[execute_clinical_sql, search_clinical_protocols],
+    tools=[execute_clinical_sql, search_clinical_protocols, get_governance_verdict],
     # --- Governance sub-agent (ADK-native A2A delegation) ---
     sub_agents=[governance_agent],
     # --- Safety settings applied at model generation time ---

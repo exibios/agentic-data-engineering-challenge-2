@@ -28,9 +28,10 @@ Traditional ETL pipelines face three core failure modes when processing these do
 │ 2. Model Selection             │ gemini-3.8-flash (Extraction/Agent)   │
 │                                │ gemini-embedding-001 (Vector Store)   │
 │ 3. Ingestion Architecture      │ Asynchronous Eventarc + Pub/Sub       │
-│ 4. Governance & Compliance     │ Inter-Agent (A2A) Governance Loop+DLP │
+│ 4. Governance & Compliance     │ Inter-Agent (A2A) Sub-Agent + Callbacks │
 │ 5. Schema Evolution            │ Additive Nullable + Idempotent MERGE  │
 │ 6. Agent Hosting               │ Vertex AI Agent Engine (Agent Runtime)│
+│ 7. Session & Memory State      │ Unified FirestoreSessionService (ADK) │
 └────────────────────────────────┴───────────────────────────────────────┘
 ```
 

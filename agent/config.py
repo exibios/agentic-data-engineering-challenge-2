@@ -60,8 +60,12 @@ class Settings:
       or "dummy-dlq-topic-id"
   )
   FIRESTORE_COLLECTION: str = os.getenv(
-      "FIRESTORE_COLLECTION", "dummy-agent-sessions"
+      "FIRESTORE_COLLECTION", "dummy-firestore-collection"
   )
+  FIRESTORE_DATABASE: str = os.getenv(
+      "FIRESTORE_DATABASE", "dummy-firestore-database"
+  )
+
   GOOGLE_GENAI_USE_VERTEXAI: str = os.getenv(
       "GOOGLE_GENAI_USE_VERTEXAI", "dummy-vertexai-flag"
   )
@@ -83,6 +87,7 @@ EXTRACTOR_MODEL = settings.EXTRACTOR_MODEL
 RAG_API_URL = settings.RAG_API_URL
 DLQ_TOPIC_ID = settings.DLQ_TOPIC_ID
 FIRESTORE_COLLECTION = settings.FIRESTORE_COLLECTION
+FIRESTORE_DATABASE = settings.FIRESTORE_DATABASE
 GOOGLE_GENAI_USE_VERTEXAI = settings.GOOGLE_GENAI_USE_VERTEXAI
 AGENT_ENGINE_ID = settings.AGENT_ENGINE_ID
 GEMINI_MODEL_LOCATION = settings.GEMINI_MODEL_LOCATION

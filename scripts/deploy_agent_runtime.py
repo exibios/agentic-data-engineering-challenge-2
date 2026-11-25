@@ -84,6 +84,8 @@ def main():
           "AGENT_MODEL": "gemini-3.8-flash",
           "MODEL_NAME": "gemini-3.8-flash",
           "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY": "true",
+          "FIRESTORE_COLLECTION":"agent_sessions",
+          "FIRESTORE_DATABASE":"clinical-trials-agents-sessions-db"
       },
   )
 

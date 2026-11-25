@@ -212,8 +212,9 @@ async def handle_eventarc_gcs_upload(request: Request):
       "proposed_schema": ["nct_id", "gcs_uri", "section_type", "chunk_text"],
   }
 
-  # 2. Step 1: A2A Governance Agent Verification
-  decision = await verify_ingestion_payload_a2a(event_payload)
+  # 2. Step 1: A2A Governance Agent Verification with deterministic session persistence
+  session_id = f"session-{nct_id}"
+  decision = await verify_ingestion_payload_a2a(event_payload, session_id=session_id)
   if decision.get("verdict") != "APPROVED":
     return {
         "status": "INTERCEPTED_ROUTED_TO_DLQ",

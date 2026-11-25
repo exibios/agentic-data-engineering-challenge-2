@@ -14,8 +14,11 @@ def get_bq_client() -> bigquery.Client:
 
 @lru_cache(maxsize=1)
 def get_firestore_client() -> firestore.Client:
-  """Returns a cached Firestore client instance."""
-  return firestore.Client(project=settings.PROJECT_ID)
+  """Returns a cached Firestore client instance respecting configured project and database."""
+  db = settings.FIRESTORE_DATABASE
+  if not db or db in ("(default)", "dummy-firestore-database"):
+    db = None
+  return firestore.Client(project=settings.PROJECT_ID, database=db)
 
 
 @lru_cache(maxsize=1)

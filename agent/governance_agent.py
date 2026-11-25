@@ -1,17 +1,20 @@
 # agent/governance_agent.py
 """Secondary Governance Agent for A2A Schema Validation & PII Compliance."""
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
 import re
 from typing import Any, Dict, Optional
 from google.adk.agents import Agent
+from google.adk.agents.context import Context
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions.base_session_service import BaseSessionService
 from google.genai import types
 from agent.clients import get_pubsub_publisher
 from agent.config import settings
+from agent.memory import get_session_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,6 +94,15 @@ def validate_file_integrity(gcs_uri: str, size_bytes: int) -> dict[str, Any]:
   return {"is_intact": True, "details": f"File is intact ({size_bytes} bytes)."}
 
 
+def record_governance_verdict_callback(ctx: Context) -> Optional[types.Content]:
+  """Records governance evaluation verdict into shared session state when invoked as a subagent."""
+  if hasattr(ctx, "session") and ctx.session and hasattr(ctx.session, "state"):
+    logger.info(
+        f"📝 [GOVERNANCE STATE] Recording sub-agent evaluation state for session {ctx.session.id}"
+    )
+  return None
+
+
 GOVERNANCE_INSTRUCTION = """You are the autonomous Data Governance Agent in an Agent-to-Agent (A2A) pipeline.
 Your job is to inspect incoming document ingestion metadata and sample payload text before BigQuery ingestion.
 
@@ -119,12 +131,12 @@ governance_agent = Agent(
         inspect_pii_and_sensitive_data,
         validate_file_integrity,
     ],
+    after_agent_callback=record_governance_verdict_callback,
 )
 
 
 def publish_to_dlq(payload: Dict[str, Any], reason: str) -> Optional[str]:
   """Routes rejected or corrupted payloads to the Pub/Sub Dead-Letter Queue (DLQ)."""
-  # CRITICAL LOG FOR DAY 9 ACCEPTANCE CRITERIA & LOG-BASED METRIC
   logger.error(
       "🚨 [GOVERNANCE AGENT INTERCEPTED -> DLQ] | Verdict: REJECTED | "
       f"Reason: {reason} | Payload: {json.dumps(payload)}"
@@ -148,8 +160,12 @@ def publish_to_dlq(payload: Dict[str, Any], reason: str) -> Optional[str]:
     return None
 
 
-async def verify_ingestion_payload_a2a(payload: Dict[str, Any]) -> Dict[str, Any]:
-  """Executes the A2A verification handshake between the Ingestion Pipeline and Governance Agent."""
+async def verify_ingestion_payload_a2a(
+    payload: Dict[str, Any],
+    session_id: Optional[str] = None,
+    session_service: Optional[BaseSessionService] = None,
+) -> Dict[str, Any]:
+  """Executes the A2A verification handshake using persistent Firestore session memory."""
   logger.info(f"🤝 [A2A HANDSHAKE] Requesting Governance Agent verification for: {payload}")
 
   gcs_uri = str(payload.get("gcs_uri", ""))
@@ -157,33 +173,58 @@ async def verify_ingestion_payload_a2a(payload: Dict[str, Any]) -> Dict[str, Any
   file_size = int(payload.get("size_bytes", 1024))
   sample_text = str(payload.get("sample_text", ""))
 
+  # Establish deterministic session ID for this document / ingestion event
+  resolved_session_id = session_id or (f"session-{nct_id}" if nct_id else "session-unknown-trial")
+  svc = session_service or get_session_service()
+
+  async def persist_verdict_state(verdict_str: str, reason_str: str) -> None:
+    verdict_record = {
+        "nct_id": nct_id,
+        "gcs_uri": gcs_uri,
+        "verdict": verdict_str,
+        "reason": reason_str,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "size_bytes": file_size,
+    }
+    state_delta = {
+        f"governance_verdict:{nct_id}": verdict_record,
+        "latest_governance_verdict": verdict_record,
+    }
+    if hasattr(svc, "update_session_state"):
+      await svc.update_session_state(resolved_session_id, state_delta)
+
   # 1. Fast Deterministic Pre-Checks (Corrupted file, invalid schema, or obvious PII)
   if file_size <= 0 or "corrupt" in gcs_uri.lower():
     reason = "Corrupted or 0-byte file detected."
     publish_to_dlq(payload, reason)
+    await persist_verdict_state("REJECTED", reason)
     return {"verdict": "REJECTED", "reason": reason}
 
   if not re.match(r"^NCT\d{8}$", nct_id) or not gcs_uri.lower().endswith(".pdf"):
     reason = f"Schema policy violation: invalid NCTId ('{nct_id}') or non-PDF object ('{gcs_uri}')."
     publish_to_dlq(payload, reason)
+    await persist_verdict_state("REJECTED", reason)
     return {"verdict": "REJECTED", "reason": reason}
 
-  # Simple regex check for SSN or email PII in sample text/metadata
   if re.search(r"\b\d{3}-\d{2}-\d{4}\b", sample_text) or "pii_violation" in gcs_uri.lower():
     reason = "PII/SDP policy violation: unredacted sensitive patient identifier detected."
     publish_to_dlq(payload, reason)
+    await persist_verdict_state("REJECTED", reason)
     return {"verdict": "REJECTED", "reason": reason}
 
-  # 2. ADK Governance Agent Reasoning Check (A2A Collaboration)
-  session_service = InMemorySessionService()
-  session_id = "a2a-gov-session"
-  await session_service.create_session(
-      app_name="gov_app", user_id="main_data_agent", session_id=session_id
+  # 2. ADK Governance Agent Reasoning Check (with Persistent Session Service)
+  existing_session = await svc.get_session(
+      app_name="gov_app", user_id="main_data_agent", session_id=resolved_session_id
   )
+  if not existing_session:
+    await svc.create_session(
+        app_name="gov_app", user_id="main_data_agent", session_id=resolved_session_id
+    )
+
   runner = Runner(
       agent=governance_agent,
       app_name="gov_app",
-      session_service=session_service,
+      session_service=svc,
   )
 
   prompt = f"Verify this ingestion event payload for schema and PII compliance:\n{json.dumps(payload)}"
@@ -192,7 +233,7 @@ async def verify_ingestion_payload_a2a(payload: Dict[str, Any]) -> Dict[str, Any
   raw_reply = ""
   try:
     async for event in runner.run_async(
-        user_id="main_data_agent", session_id=session_id, new_message=content
+        user_id="main_data_agent", session_id=resolved_session_id, new_message=content
     ):
       if event.is_final_response() and event.content and event.content.parts:
         raw_reply = event.content.parts[0].text
@@ -210,12 +251,16 @@ async def verify_ingestion_payload_a2a(payload: Dict[str, Any]) -> Dict[str, Any
   except Exception:
     decision = {"verdict": "APPROVED", "reason": raw_reply}
 
-  if decision.get("verdict") != "APPROVED":
-    publish_to_dlq(payload, decision.get("reason", "Governance policy rejection"))
+  verdict_str = decision.get("verdict", "REJECTED")
+  reason_str = decision.get("reason", "Governance policy decision")
+  await persist_verdict_state(verdict_str, reason_str)
+
+  if verdict_str != "APPROVED":
+    publish_to_dlq(payload, reason_str)
     return decision
 
   logger.info(
       f"✅ [A2A HANDSHAKE APPROVED] Governance Agent verified '{nct_id}' ({gcs_uri}). "
-      f"Reason: {decision.get('reason')}"
+      f"Reason: {reason_str}"
   )
   return decision

@@ -250,3 +250,67 @@ def search_clinical_protocols(
   except Exception as e:
     logger.error(f"❌ Vector Search request failed: {e}")
     return {"status": "error", "error_message": str(e)}
+
+
+def get_governance_verdict(
+    nct_id: str,
+    tool_context: Any = None,
+) -> dict[str, Any]:
+  """Retrieves the governance, schema, and PII verification verdict for a specific clinical trial (NCT ID).
+
+  Checks active session state and persistent Firestore session memory for prior evaluation records.
+  """
+  state_key = f"governance_verdict:{nct_id}"
+
+  # 1. Check local session state via injected ToolContext
+  if tool_context and hasattr(tool_context, "state") and tool_context.state:
+    if state_key in tool_context.state:
+      return {
+          "status": "found",
+          "source": "session_state",
+          "nct_id": nct_id,
+          "verdict": tool_context.state[state_key],
+      }
+    if "latest_governance_verdict" in tool_context.state:
+      latest = tool_context.state["latest_governance_verdict"]
+      if isinstance(latest, dict) and latest.get("nct_id") == nct_id:
+        return {
+            "status": "found",
+            "source": "session_state_latest",
+            "nct_id": nct_id,
+            "verdict": latest,
+        }
+
+  # 2. Check persistent Firestore session memory
+  try:
+    from agent.memory import get_session_service
+
+    svc = get_session_service()
+    if hasattr(svc, "get_session_state_sync"):
+      state = svc.get_session_state_sync(f"session-{nct_id}")
+      if state and state_key in state:
+        return {
+            "status": "found",
+            "source": "firestore_session",
+            "nct_id": nct_id,
+            "verdict": state[state_key],
+        }
+      if state and "latest_governance_verdict" in state:
+        return {
+            "status": "found",
+            "source": "firestore_session_latest",
+            "nct_id": nct_id,
+            "verdict": state["latest_governance_verdict"],
+        }
+  except Exception as e:
+    logger.warning(f"Error checking Firestore session state for {nct_id}: {e}")
+
+  return {
+      "status": "not_found",
+      "nct_id": nct_id,
+      "message": (
+          f"No governance verification record found for {nct_id}. "
+          "The document may not have been ingested yet or was processed in an unlinked session."
+      ),
+  }
+
