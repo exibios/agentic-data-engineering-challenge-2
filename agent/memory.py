@@ -5,6 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 import json
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -37,8 +38,16 @@ class FirestoreSessionService(BaseSessionService):
       database: Optional[str] = None,
       timeout: float = DEFAULT_FS_TIMEOUT,
   ):
-    self.collection_name = collection_name or settings.FIRESTORE_COLLECTION
-    self.database = database or settings.FIRESTORE_DATABASE
+    self.collection_name = (
+        collection_name
+        or os.getenv("FIRESTORE_COLLECTION")
+        or settings.FIRESTORE_COLLECTION
+    )
+    self.database = (
+        database
+        or os.getenv("FIRESTORE_DATABASE")
+        or settings.FIRESTORE_DATABASE
+    )
     self.timeout = timeout
     self._in_memory_fallback: Optional[InMemorySessionService] = None
 
@@ -48,17 +57,15 @@ class FirestoreSessionService(BaseSessionService):
     return self._in_memory_fallback
 
   def _get_collection(self):
-    """Retrieves Firestore collection reference with graceful fallback."""
-    if self._in_memory_fallback is not None:
-      return None
+    """Retrieves Firestore collection reference without sticky fallback lockout."""
     try:
-      client = get_firestore_client()
+      client = get_firestore_client(database=self.database)
       return client.collection(self.collection_name)
     except Exception as e:
       logger.warning(
-          f"Firestore client connection failed ({e}). Falling back to InMemorySessionService."
+          f"Firestore client connection failed (database={self.database}, "
+          f"collection={self.collection_name}): {e}. Using transient in-memory fallback."
       )
-      self._ensure_in_memory_fallback()
       return None
 
   async def create_session(
@@ -350,8 +357,11 @@ class FirestoreSessionService(BaseSessionService):
 _SESSION_SERVICE_INSTANCE: Optional[FirestoreSessionService] = None
 
 
-def get_session_service() -> FirestoreSessionService:
-  """Returns the singleton instance of FirestoreSessionService."""
+def get_session_service(*args, **kwargs) -> FirestoreSessionService:
+  """Returns the singleton instance of FirestoreSessionService.
+
+  Accepts *args/**kwargs so it can serve directly as AdkApp's session_service_builder.
+  """
   global _SESSION_SERVICE_INSTANCE
   if _SESSION_SERVICE_INSTANCE is None:
     _SESSION_SERVICE_INSTANCE = FirestoreSessionService()
@@ -366,12 +376,18 @@ class SessionMemory:
 
   def __init__(self, service: Optional[FirestoreSessionService] = None):
     self.service = service or get_session_service()
-    self.collection_name = settings.FIRESTORE_COLLECTION
-    self.database = settings.FIRESTORE_DATABASE
+    self.collection_name = (
+        os.getenv("FIRESTORE_COLLECTION") or settings.FIRESTORE_COLLECTION
+    )
+    self.database = (
+        os.getenv("FIRESTORE_DATABASE") or settings.FIRESTORE_DATABASE
+    )
 
   @property
   def collection(self):
-    return get_firestore_client().collection(self.collection_name)
+    return get_firestore_client(database=self.database).collection(
+        self.collection_name
+    )
 
   def add_turn(self, session_id: str, role: str, message: str) -> None:
     doc_ref = self.collection.document(session_id)

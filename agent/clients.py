@@ -2,6 +2,8 @@
 """Lazy singleton instantiation of Google Cloud SDK clients."""
 
 from functools import lru_cache
+import os
+from typing import Optional
 from google.cloud import bigquery, dlp_v2, firestore, pubsub_v1, storage
 from agent.config import settings
 
@@ -12,13 +14,14 @@ def get_bq_client() -> bigquery.Client:
   return bigquery.Client(project=settings.PROJECT_ID)
 
 
-@lru_cache(maxsize=1)
-def get_firestore_client() -> firestore.Client:
-  """Returns a cached Firestore client instance respecting configured project and database."""
-  db = settings.FIRESTORE_DATABASE
+@lru_cache(maxsize=4)
+def get_firestore_client(database: Optional[str] = None) -> firestore.Client:
+  """Returns a cached Firestore client instance respecting project and database."""
+  project = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("PROJECT_ID") or settings.PROJECT_ID
+  db = database or os.getenv("FIRESTORE_DATABASE") or settings.FIRESTORE_DATABASE
   if not db or db in ("(default)", "dummy-firestore-database"):
     db = None
-  return firestore.Client(project=settings.PROJECT_ID, database=db)
+  return firestore.Client(project=project, database=db)
 
 
 @lru_cache(maxsize=1)

@@ -35,22 +35,23 @@ flowchart TD
         VEC[("embedded_doc_chunks\n+ IVF Cosine Vector Index")]
     end
 
-    subgraph Serving["5. Hybrid Serving Infrastructure"]
+    subgraph Serving["5. Hybrid Serving & Unified Session Layer"]
         FASTAPI["FastAPI on Cloud Run\n(POST /search, GET /metadata, POST /v1/chat)"]
-        FS[("Firestore Session State\n(agent_sessions)")]
-        RUNTIME["Vertex AI Agent Engine (Agent Runtime)\n(ADK AdkApp with BYOSA Service Account)"]
+        FS[("Cloud Firestore (FirestoreSessionService)\ndb: clinical-trials-agents-sessions-db\ncollection: agent_sessions")]
+        RUNTIME["Vertex AI Agent Engine (Agent Runtime)\n(ADK AdkApp: root_agent + callbacks + sub_agents)"]
     end
 
     subgraph Telemetry["6. Observability & FinOps"]
-        TRACE["Google Cloud Trace\n(OpenTelemetry BatchSpanProcessor)"]
+        TRACE["Google Cloud Trace\n(Agent Engine OTLP / Ambient ADK Spans)"]
         LOGS["Cloud Logging & Monitoring\n(Distribution: agent_session_total_tokens, latency)"]
     end
 
     %% Ingestion Flow
     CT_CDN -->|Download PDF| GCS
     GCS -->|Object Finalized| EV --> PS --> FASTAPI
-    FASTAPI -->|A2A Handshake| GOV
+    FASTAPI -->|A2A Handshake: session-{nct_id}| GOV
     GOV -->|Scan PII| DLP
+    GOV -->|Persist Verdict State| FS
     GOV -->|Reject Violation| DLQ
     GOV -->|Approve| CT_API
     CT_API -->|Resolve Metadata| META
@@ -62,8 +63,10 @@ flowchart TD
     USER -->|API Query| FASTAPI
     FASTAPI <--> FS
     FASTAPI <-->|VECTOR_SEARCH| VEC
+    RUNTIME -->|sub_agents| GOV
     RUNTIME -->|execute_clinical_sql| META
     RUNTIME -->|search_clinical_protocols| FASTAPI
+    RUNTIME -->|get_governance_verdict| FS
 
     %% Telemetry Flow
     FASTAPI -.-> LOGS
@@ -93,10 +96,11 @@ sequenceDiagram
     EV->>API: POST /v1/events/gcs-ingest (Push envelope)
     
     rect rgb(240, 248, 255)
-        Note over API,Gov: Step 1: Agent-to-Agent (A2A) Verification
-        API->>Gov: verify_ingestion_payload_a2a(payload)
+        Note over API,Gov: Step 1: Agent-to-Agent (A2A) Verification & Session Persistence
+        API->>Gov: verify_ingestion_payload_a2a(payload, session_id="session-{nct_id}")
         Gov->>Gov: Fast deterministic regex check (NCT\\d{8}, .pdf, size > 0)
         Gov->>DLP: Inspect sample text for PII/PHI
+        Gov->>Gov: Persist structured verdict to FirestoreSessionService
         alt Policy Violation or Corrupted File
             Gov->>DLQ: publish_to_dlq(payload, rejection_reason)
             Gov-->>API: Verdict: REJECTED
@@ -141,11 +145,18 @@ The serving layer utilizes a dual-engine architecture:
 - **Framework**: `google.adk` (Agent Development Kit 2.0).
 - **Packaging**: Initialized via `vertexai.agent_engines.AdkApp(agent=root_agent, enable_tracing=True)`.
 - **Identity & Security (BYOSA)**: Runs under the dedicated service account `80080086039-compute@developer.gserviceaccount.com`.
-- **Managed Memory & Sessions**: Automatically stores conversational turns, agent thoughts, and tool call history across turns (`create_session`, `stream_query`).
+- **Guardrails & Sub-Agents**:
+  - `before_model_callback`: `pii_guardrail_before_model` redacts PII via Cloud DLP before prompts reach Gemini.
+  - `after_model_callback`: `safety_response_monitor` logs safety finish reasons to the ambient OpenTelemetry span.
+  - `before_tool_callback`: `sql_safety_before_tool` enforces `SELECT`/`WITH` read-only SQL before tool execution.
+  - `sub_agents`: `[governance_agent]` enables live A2A delegation from `root_agent`.
+  - `generate_content_config`: Enforces `VERTEX_SAFETY_SETTINGS`.
+- **Unified Memory & Sessions**: `FirestoreSessionService` (`agent/memory.py`) persists ADK `Session` state, events, and turn history in Cloud Firestore (`clinical-trials-agents-sessions-db` / `agent_sessions`).
 - **Dynamic Intent Routing**:
   - **Analytical Query**: Direct BigQuery SQL execution over `studies_metadata` via `execute_clinical_sql`.
   - **Conceptual Query**: Semantic retrieval over clinical protocols via `search_clinical_protocols` (calling Cloud Run `/search`).
   - **Hybrid Query**: Executes SQL filter to narrow trial cohorts, followed by semantic vector search to answer specific protocol questions.
+  - **Governance Query**: Retrieves persisted ingestion verdicts via `get_governance_verdict` or delegates live validation to `clinical_trials_governance_agent`.
 
 ---
 
@@ -171,9 +182,11 @@ Observability is engineered to satisfy the Day 10 monitoring requirements:
 
 ### 5.1 Distributed Tracing (OpenTelemetry)
 - Both Cloud Run and Vertex AI Agent Engine are instrumented with OpenTelemetry SDK.
-- Exported spans flow asynchronously via `CloudTraceSpanExporter` into **Google Cloud Trace**, providing end-to-end waterfall visualization of:
+- In Agent Runtime (`GOOGLE_CLOUD_AGENT_ENGINE_ID` / `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` detected), `agent/telemetry.py` preserves the host's native OTLP exporter to `telemetry.googleapis.com` instead of overwriting `TracerProvider`.
+- Tools (`execute_clinical_sql`, `search_clinical_protocols`) and callbacks attach custom attributes (`clinical.row_count`, `clinical.chunks_retrieved`, `clinical.latency_ms`, `guardrail.*`) directly to the ambient ADK span and resolve `gen_ai.conversation.id` via `get_active_conversation_id()` so all spans correlate cleanly in Cloud Trace.
+- Exported spans flow asynchronously into **Google Cloud Trace**, providing end-to-end waterfall visualization of:
   - Client HTTP Request $\rightarrow$ FastAPI Endpoint $\rightarrow$ BigQuery Query Execution $\rightarrow$ Cloud DLP Inspection.
-  - User Prompt $\rightarrow$ Agent Thought $\rightarrow$ Tool Invocation (`execute_clinical_sql` / `search_clinical_protocols`) $\rightarrow$ Model Generation.
+  - User Prompt $\rightarrow$ Callbacks $\rightarrow$ Agent Thought $\rightarrow$ Tool Invocation $\rightarrow$ Model Generation.
 
 ### 5.2 Structured Cloud Logging & Metric Ingestion
 - Zero-latency JSON payloads are written directly to `sys.stdout`. Cloud Run and Agent Runtime parse stdout streams into structured Cloud Logging entries under `jsonPayload`.

@@ -65,13 +65,16 @@ Traditional ETL pipelines face three core failure modes when processing these do
   - Client uploads receive an immediate `202 Accepted` response.
   - Pub/Sub provides native message buffering, automatic retries with exponential backoff, and dead-letter queueing, insulating downstream BigQuery quotas from traffic bursts.
 
-### 3.4 Decision 4: Agent-to-Agent (A2A) Governance & Dead-Letter Queue (DLQ)
-- **Decision:** Establish an automated Agent-to-Agent (A2A) validation checkpoint before BigQuery ingestion. The pipeline invokes `clinical_trials_governance_agent` to review the incoming document payload against three policies:
-  1. **Schema Policy**: Strict NCT ID format (`^NCT\d{8}$`), `.pdf` filename extension, and valid metadata fields.
-  2. **File Integrity Policy**: Object size $> 0$ bytes, non-corrupted header.
-  3. **PII/PHI Compliance Policy**: Zero unredacted patient identifiers (SSNs, medical record numbers, patient names). Cloud DLP inspects sample text.
-  - Violations are immediately intercepted, published to `clinical-trials-ingest-dlq`, and logged with `🚨 [GOVERNANCE AGENT INTERCEPTED -> DLQ]`.
-- **Rationale:** Guarantees that untrusted external inputs cannot corrupt the enterprise clinical lakehouse.
+### 3.4 Decision 4: Agent-to-Agent (A2A) Governance, ADK Callbacks & Dead-Letter Queue (DLQ)
+- **Decision:** Establish an automated Agent-to-Agent (A2A) validation checkpoint before BigQuery ingestion and wire governance & guardrails natively into `root_agent` using ADK capabilities:
+  1. **A2A Sub-Agent (`sub_agents=[governance_agent]`)**: `clinical_trials_governance_agent` is both invoked by `/v1/events/gcs-ingest` (`verify_ingestion_payload_a2a`) and attached as a delegatable sub-agent on `root_agent` with tools (`validate_document_schema`, `inspect_pii_and_sensitive_data`, `validate_file_integrity`).
+  2. **ADK Guardrail Callbacks (`agent/callbacks.py`)**:
+     - `before_model_callback` (`pii_guardrail_before_model`): Scans user prompts with Cloud DLP and redacts PII in-place before reaching Gemini.
+     - `after_model_callback` (`safety_response_monitor`): Logs response `finish_reason` and safety-block telemetry to the ambient OpenTelemetry span.
+     - `before_tool_callback` (`sql_safety_before_tool`): Enforces read-only `SELECT`/`WITH` SQL policies before `execute_clinical_sql` runs.
+  3. **Vertex AI Safety Settings**: `VERTEX_SAFETY_SETTINGS` wired directly into `root_agent` via `GenerateContentConfig`.
+  - Ingestion violations (invalid NCT ID `^NCT\d{8}$`, non-`.pdf`, 0-byte/corrupted file, or unredacted PII/PHI) are immediately intercepted, published to `clinical-trials-ingest-dlq`, and logged with `🚨 [GOVERNANCE AGENT INTERCEPTED -> DLQ]`.
+- **Rationale:** Guarantees that untrusted external inputs cannot corrupt the enterprise clinical lakehouse and enforces PII/SQL guardrails uniformly across every conversational turn.
 
 ### 3.5 Decision 5: Idempotency & Schema Evolution Policy
 - **Decision:**
@@ -85,8 +88,17 @@ Traditional ETL pipelines face three core failure modes when processing these do
 - **Rationale:**
   - Managed serverless lifecycle with automatic scaling.
   - Out-of-the-box managed session memory and conversational history tracking.
-  - Native integration with Google Cloud Trace via OpenTelemetry (`enable_tracing=True`).
+  - Native integration with Google Cloud Trace via OpenTelemetry (`enable_tracing=True`). `agent/telemetry.py` detects `GOOGLE_CLOUD_AGENT_ENGINE_ID` / `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` and preserves Agent Engine's native OTLP exporter (`telemetry.googleapis.com`), attaching custom metrics directly to ambient ADK `execute_tool` spans so `gen_ai.conversation.id` is never broken.
   - Strict compliance and IAM boundary via `80080086039-compute@developer.gserviceaccount.com`.
+
+### 3.7 Decision 7: Unified Persistent Session State (`FirestoreSessionService`)
+- **Decision:** Replace ephemeral `InMemorySessionService` instances with a shared, ADK-native `FirestoreSessionService(BaseSessionService)` in `agent/memory.py`, backed by Cloud Firestore database `clinical-trials-agents-sessions-db` and collection `agent_sessions`, with a graceful in-memory fallback for offline unit tests.
+- **Deterministic Correlation & Inter-Agent Memory Sharing:**
+  - The GCS ingestion webhook (`POST /v1/events/gcs-ingest`) derives `session_id = f"session-{nct_id}"` and passes it to `verify_ingestion_payload_a2a`.
+  - The Governance Agent persists structured evaluation verdicts (`governance_verdict:{nct_id}`, `latest_governance_verdict`) into the shared Firestore session state.
+  - `root_agent` inspects persisted verdicts via the `get_governance_verdict` tool (`agent/tools.py`).
+  - Legacy `SessionMemory` (`add_turn`, `get_turns`) is preserved as a facade over the same Firestore document structure.
+- **Rationale:** Eliminates isolated/ephemeral A2A state and enables `root_agent` to answer compliance and audit questions about ingested clinical trials across independent runs.
 
 ---
 

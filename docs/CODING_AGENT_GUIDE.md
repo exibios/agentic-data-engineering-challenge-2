@@ -75,30 +75,42 @@ All agent code lives in `/agent`. Built with `google-adk` (`google.adk`), `googl
 ### 3.1 `agent/agent.py` - Primary Conversational Data Agent
 - **Agent Name**: `clinical_trials_data_agent`
 - **Model**: `gemini-3.8-flash` (Vertex AI endpoint with `GOOGLE_GENAI_USE_VERTEXAI=True`, `GOOGLE_CLOUD_LOCATION="global"`).
-- **Role**: Conversational router handling natural language queries through two registered tools:
+- **Sub-Agents**: `sub_agents=[governance_agent]` for live A2A delegation.
+- **Safety & Callbacks**:
+  - `generate_content_config=types.GenerateContentConfig(safety_settings=VERTEX_SAFETY_SETTINGS)`
+  - `before_model_callback=pii_guardrail_before_model`
+  - `after_model_callback=safety_response_monitor`
+  - `before_tool_callback=sql_safety_before_tool`
+- **Role**: Conversational router handling natural language queries through three registered tools:
   - `execute_clinical_sql`: Analytical queries (counts, trial statuses, grouping by status, filtering by `nct_id`).
   - `search_clinical_protocols`: Semantic / conceptual queries (inclusion/exclusion criteria, endpoints, dosing, adverse events).
+  - `get_governance_verdict`: Retrieves persisted governance/compliance verdicts for a given `nct_id` from session state or Firestore.
   - *Hybrid*: Executes SQL first to retrieve/filter `nct_id`s, then vector search to query protocol contents.
 
 ### 3.2 `agent/tools.py` - ADK Function Tools
 - `execute_clinical_sql(sql_query: str) -> Dict[str, Any]`
   - Queries: Fully qualified BigQuery table `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}` (`studies_metadata`).
   - Columns: `nct_id`, `brief_title`, `overall_status`, `doc_filename`, `cdn_url`, `gcs_uri`.
-  - Guardrail: Rejects queries not starting with `SELECT` or `WITH`. Caps results to 50 rows.
-  - Telemetry: Emits OpenTelemetry span and Cloud Logging telemetry for query execution latency and row counts.
+  - Guardrail: Rejects queries not starting with `SELECT` or `WITH` (also enforced upfront by `sql_safety_before_tool`). Caps results to 50 rows.
+  - Telemetry: Attaches `clinical.row_count` and `clinical.latency_ms` to the ambient ADK `execute_tool` span and resolves session ID via `get_active_conversation_id()`.
 - `search_clinical_protocols(search_query: str, top_k: int = 5) -> Dict[str, Any]`
   - Queries: FastAPI RAG endpoint `POST {RAG_API_URL}` (`http://localhost:8080/search` or Cloud Run URL).
   - Auth: Automatically attaches OIDC identity tokens using GCP Metadata Server (in Cloud Run / Agent Engine) or `gcloud auth print-identity-token` (in Cloud Shell).
   - Returns: Retrieved chunks with `nct_id`, `section_type`, `gcs_uri`, `chunk_text`, `cosine_similarity`.
-  - Telemetry: Emits OpenTelemetry span (`search_clinical_protocols`) and structured Cloud Logging telemetry for endpoint latency and chunk token metrics.
+  - Telemetry: Attaches `clinical.chunks_retrieved` and `clinical.latency_ms` to the ambient ADK span and emits structured Cloud Logging metrics.
+- `get_governance_verdict(nct_id: str, tool_context: Any = None) -> Dict[str, Any]`
+  - Checks `tool_context.state` first (`governance_verdict:{nct_id}` / `latest_governance_verdict`), then queries `FirestoreSessionService.get_session_state_sync(f"session-{nct_id}")`.
 
 ### 3.3 `agent/governance_agent.py` - Agent-to-Agent (A2A) Governance & DLQ
 - **Agent Name**: `clinical_trials_governance_agent` (Model: `gemini-3.8-flash`)
+- **Tools**: `validate_document_schema`, `inspect_pii_and_sensitive_data`, `validate_file_integrity`.
+- **Callback**: `after_agent_callback=record_governance_verdict_callback`.
 - **Key Functions**:
-  - `verify_ingestion_payload_a2a(payload: Dict[str, Any]) -> Dict[str, Any]`:
-    1. *Fast deterministic pre-checks*: validates `nct_id` regex (`^NCT\d{8}$`), `.pdf` extension, non-zero file size, and raw regex for SSN/PII.
-    2. *LLM validation*: Launches an ADK `Runner` to evaluate payload against Schema, File Integrity, and PII policies.
-    3. *Output*: Strict JSON verdict `{"verdict": "APPROVED" | "REJECTED", "reason": "..."}`.
+  - `verify_ingestion_payload_a2a(payload: Dict[str, Any], session_id: Optional[str] = None, session_service: Optional[BaseSessionService] = None) -> Dict[str, Any]`:
+    1. *Deterministic Session*: Resolves `session_id = session_id or f"session-{nct_id}"` using `get_session_service()` (`FirestoreSessionService`).
+    2. *Fast deterministic pre-checks*: validates `nct_id` regex (`^NCT\d{8}$`), `.pdf` extension, non-zero file size, and raw regex for SSN/PII.
+    3. *LLM validation*: Launches an ADK `Runner` with `FirestoreSessionService` to evaluate payload against Schema, File Integrity, and PII policies.
+    4. *Persistence & Output*: Persists structured verdict (`governance_verdict:{nct_id}`, `latest_governance_verdict`) into Firestore session state and returns `{"verdict": "APPROVED" | "REJECTED", "reason": "..."}`.
   - `publish_to_dlq(payload: Dict[str, Any], reason: str) -> Optional[str]`:
     - Publishes rejected events to Cloud Pub/Sub DLQ topic (`DLQ_TOPIC_ID`, default: `clinical-trials-ingest-dlq`).
     - Emits structured error log: `🚨 [GOVERNANCE AGENT INTERCEPTED -> DLQ]`.
@@ -114,17 +126,25 @@ All agent code lives in `/agent`. Built with `google-adk` (`google.adk`), `googl
   - De-identifies text replacing matches with `[INFO_TYPE]`. Returns `(sanitized_text, pii_detected_bool)`.
 - `VERTEX_SAFETY_SETTINGS`: Configures `types.SafetySetting` for `HATE_SPEECH`, `DANGEROUS_CONTENT`, `SEXUALLY_EXPLICIT`, `HARASSMENT` at `BLOCK_MEDIUM_AND_ABOVE`.
 
-### 3.6 `agent/memory.py` - Firestore Session Memory
-- `SessionMemory` class:
-  - Short-term conversational state backed by Cloud Firestore (`FIRESTORE_COLLECTION`, default: `agent_sessions`).
-  - Methods: `add_turn(session_id, role, message)` and `get_turns(session_id, limit=10)`.
+### 3.6 `agent/memory.py` - Unified Firestore Session Service
+- `FirestoreSessionService(BaseSessionService)`:
+  - ADK-native persistent session provider backed by Cloud Firestore (`FIRESTORE_DATABASE`, `FIRESTORE_COLLECTION`), with automatic `InMemorySessionService` fallback for offline tests.
+  - Implements `create_session`, `get_session`, `append_event`, `list_sessions`, `delete_session`, `update_session_state`, and `get_session_state_sync`.
+- `get_session_service() -> FirestoreSessionService`: Singleton factory shared across ADK runners and tools.
+- `SessionMemory` class: Backwards-compatible facade over the same Firestore collection (`add_turn`, `get_turns`).
 
 ### 3.7 `agent/telemetry.py` - FinOps & OpenTelemetry
-- Tracer: OpenTelemetry `TracerProvider` with `CloudTraceSpanExporter` (`BatchSpanProcessor`).
+- Tracer: `_init_cloud_trace_provider_if_needed()` checks `GOOGLE_CLOUD_AGENT_ENGINE_ID` / `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` so Agent Engine's native OTLP exporter (`telemetry.googleapis.com`) is never clobbered.
+- `get_active_conversation_id()`: Extracts `gen_ai.conversation.id` from the active OpenTelemetry span attributes.
 - Structured Cloud Logging: Emits zero-latency JSON payloads directly to `sys.stdout` for Cloud Run and Cloud Logging log-based metrics:
   - Metric 1: `agent_session_total_tokens` (distribution metric grouped by `session_id`).
   - Metric 2: `agent_execution_latency_ms` (distribution metric capturing execution latency).
   - FinOps Cost Formula: `(prompt_tokens * $0.000000075) + (response_tokens * $0.00000030)`.
+
+### 3.8 `agent/callbacks.py` - ADK Guardrail Callbacks
+- `pii_guardrail_before_model(ctx, llm_request)`: Intercepts user prompts before Gemini calls, redacts PII in-place via `redact_pii_dlp()`, and stamps `guardrail.pii.*` attributes on the ambient span.
+- `safety_response_monitor(ctx, llm_response)`: Records `guardrail.response.finish_reason` and `guardrail.response.safety_blocked` on the ambient span.
+- `sql_safety_before_tool(tool, args, ctx)`: Intercepts `execute_clinical_sql` calls and blocks any query not starting with `SELECT` or `WITH`.
 
 ---
 
@@ -146,7 +166,7 @@ All API and serving logic lives in `/pipeline`.
   - Emits telemetry and OpenTelemetry spans.
 - **`POST /v1/events/gcs-ingest`** (Eventarc Webhook):
   - Decodes incoming Pub/Sub push envelope or direct Eventarc CloudEvent.
-  - Executes A2A verification via `verify_ingestion_payload_a2a()`. If rejected, routes to DLQ and returns 200/202.
+  - Derives deterministic `session_id = f"session-{nct_id}"` and executes A2A verification via `verify_ingestion_payload_a2a(event_payload, session_id=session_id)`. If rejected, routes to DLQ and returns 200/202.
   - Fetches study metadata from ClinicalTrials.gov API v2 and performs an idempotent BigQuery `MERGE` into `studies_metadata`.
   - Executes incremental extraction and embedding queries via `pipeline/queries.py`.
 - **`POST /v1/chat`** (Agent Runtime Proxy):
@@ -192,10 +212,16 @@ The conversational ADK agent is deployed to **Vertex AI Agent Engine** (managed 
   ./.venv/bin/python scripts/deploy_agent_runtime.py
   ```
 
-### 5.3 Testing Agent Engine (`scripts/test_agent_runtime.py`)
+### 5.3 Testing Agent Engine & Unified Verification
 ```bash
-export AGENT_ENGINE_RESOURCE_NAME="projects/80080086039/locations/us-central1/reasoningEngines/<RESOURCE_ID>"
+export AGENT_ENGINE_RESOURCE_NAME="projects/80080086039/locations/us-central1/reasoningEngines/5928414139729838080"
 ./.venv/bin/python scripts/test_agent_runtime.py
+
+# Unit tests for FirestoreSessionService & inter-agent verdict lookup
+./.venv/bin/python tests/test_firestore_session_service.py
+
+# Full end-to-end verification (Days 6-10 + Agent Runtime)
+./.venv/bin/python scripts/final_challenge_test.py --url "<CLOUD_RUN_URL>" --auth --verify-runtime
 ```
 
 ---
