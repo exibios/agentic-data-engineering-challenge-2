@@ -15,7 +15,6 @@ import vertexai
 from vertexai import agent_engines
 from vertexai.agent_engines import AdkApp
 from agent.agent import root_agent
-from agent.memory import get_session_service
 
 PROJECT_ID = "data4ai-challenge-03"
 DEPLOY_REGION = "us-central1"  # Agent Engine hosting region
@@ -33,11 +32,10 @@ def main():
       staging_bucket=STAGING_BUCKET,
   )
 
-  # Wrap the ADK Agent in AdkApp with Cloud Trace and FirestoreSessionService enabled
+  # Wrap the ADK Agent in AdkApp with native Agent Engine sessions & Cloud Trace enabled
   adk_app = AdkApp(
       agent=root_agent,
       enable_tracing=True,
-      session_service_builder=get_session_service,
   )
 
   print("📦 Packaging ./agent and deploying to Agent Runtime (takes ~3-5 mins)...")

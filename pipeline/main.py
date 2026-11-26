@@ -12,6 +12,7 @@ from google.cloud import bigquery
 from agent.clients import get_bq_client
 from agent.config import settings
 from agent.governance_agent import verify_ingestion_payload_a2a
+from agent.tools import record_ingest_event
 from agent.guardrails import redact_pii_dlp
 from agent.memory import SessionMemory
 from agent.telemetry import log_agent_session_metrics, tracer
@@ -212,9 +213,15 @@ async def handle_eventarc_gcs_upload(request: Request):
       "proposed_schema": ["nct_id", "gcs_uri", "section_type", "chunk_text"],
   }
 
-  # 2. Step 1: A2A Governance Agent Verification with deterministic session persistence
-  session_id = f"session-{nct_id}"
-  decision = await verify_ingestion_payload_a2a(event_payload, session_id=session_id)
+  # 2. Step 1: Record GCS ingest metadata to Firestore Blackboard & run A2A Governance
+  await asyncio.to_thread(
+      record_ingest_event,
+      nct_id=nct_id,
+      gcs_uri=gcs_uri,
+      size_bytes=size_bytes,
+      status="PENDING_GOVERNANCE",
+  )
+  decision = await verify_ingestion_payload_a2a(event_payload)
   if decision.get("verdict") != "APPROVED":
     return {
         "status": "INTERCEPTED_ROUTED_TO_DLQ",

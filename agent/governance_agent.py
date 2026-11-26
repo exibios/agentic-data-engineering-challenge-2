@@ -10,11 +10,11 @@ from typing import Any, Dict, Optional
 from google.adk.agents import Agent
 from google.adk.agents.context import Context
 from google.adk.runners import Runner
-from google.adk.sessions.base_session_service import BaseSessionService
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from agent.clients import get_pubsub_publisher
 from agent.config import settings
-from agent.memory import get_session_service
+from agent.tools import record_governance_verdict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -162,10 +162,8 @@ def publish_to_dlq(payload: Dict[str, Any], reason: str) -> Optional[str]:
 
 async def verify_ingestion_payload_a2a(
     payload: Dict[str, Any],
-    session_id: Optional[str] = None,
-    session_service: Optional[BaseSessionService] = None,
 ) -> Dict[str, Any]:
-  """Executes the A2A verification handshake using persistent Firestore session memory."""
+  """Executes the A2A verification handshake and records the verdict to the Firestore Blackboard."""
   logger.info(f"🤝 [A2A HANDSHAKE] Requesting Governance Agent verification for: {payload}")
 
   gcs_uri = str(payload.get("gcs_uri", ""))
@@ -173,58 +171,45 @@ async def verify_ingestion_payload_a2a(
   file_size = int(payload.get("size_bytes", 1024))
   sample_text = str(payload.get("sample_text", ""))
 
-  # Establish deterministic session ID for this document / ingestion event
-  resolved_session_id = session_id or (f"session-{nct_id}" if nct_id else "session-unknown-trial")
-  svc = session_service or get_session_service()
-
-  async def persist_verdict_state(verdict_str: str, reason_str: str) -> None:
-    verdict_record = {
-        "nct_id": nct_id,
-        "gcs_uri": gcs_uri,
-        "verdict": verdict_str,
-        "reason": reason_str,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "size_bytes": file_size,
-    }
-    state_delta = {
-        f"governance_verdict:{nct_id}": verdict_record,
-        "latest_governance_verdict": verdict_record,
-    }
-    if hasattr(svc, "update_session_state"):
-      await svc.update_session_state(resolved_session_id, state_delta)
+  async def persist_verdict_to_blackboard(verdict_str: str, reason_str: str) -> None:
+    record_governance_verdict(
+        nct_id=nct_id or "UNKNOWN_NCT",
+        verdict=verdict_str,
+        reason=reason_str,
+        gcs_uri=gcs_uri,
+        size_bytes=file_size,
+    )
 
   # 1. Fast Deterministic Pre-Checks (Corrupted file, invalid schema, or obvious PII)
   if file_size <= 0 or "corrupt" in gcs_uri.lower():
     reason = "Corrupted or 0-byte file detected."
     publish_to_dlq(payload, reason)
-    await persist_verdict_state("REJECTED", reason)
+    await persist_verdict_to_blackboard("REJECTED", reason)
     return {"verdict": "REJECTED", "reason": reason}
 
   if not re.match(r"^NCT\d{8}$", nct_id) or not gcs_uri.lower().endswith(".pdf"):
     reason = f"Schema policy violation: invalid NCTId ('{nct_id}') or non-PDF object ('{gcs_uri}')."
     publish_to_dlq(payload, reason)
-    await persist_verdict_state("REJECTED", reason)
+    await persist_verdict_to_blackboard("REJECTED", reason)
     return {"verdict": "REJECTED", "reason": reason}
 
   if re.search(r"\b\d{3}-\d{2}-\d{4}\b", sample_text) or "pii_violation" in gcs_uri.lower():
     reason = "PII/SDP policy violation: unredacted sensitive patient identifier detected."
     publish_to_dlq(payload, reason)
-    await persist_verdict_state("REJECTED", reason)
+    await persist_verdict_to_blackboard("REJECTED", reason)
     return {"verdict": "REJECTED", "reason": reason}
 
-  # 2. ADK Governance Agent Reasoning Check (with Persistent Session Service)
-  existing_session = await svc.get_session(
-      app_name="gov_app", user_id="main_data_agent", session_id=resolved_session_id
+  # 2. ADK Governance Agent Reasoning Check (ephemeral InMemorySessionService)
+  session_service = InMemorySessionService()
+  run_session_id = f"a2a-gov-{nct_id or 'unknown'}"
+  await session_service.create_session(
+      app_name="gov_app", user_id="main_data_agent", session_id=run_session_id
   )
-  if not existing_session:
-    await svc.create_session(
-        app_name="gov_app", user_id="main_data_agent", session_id=resolved_session_id
-    )
 
   runner = Runner(
       agent=governance_agent,
       app_name="gov_app",
-      session_service=svc,
+      session_service=session_service,
   )
 
   prompt = f"Verify this ingestion event payload for schema and PII compliance:\n{json.dumps(payload)}"
@@ -233,7 +218,7 @@ async def verify_ingestion_payload_a2a(
   raw_reply = ""
   try:
     async for event in runner.run_async(
-        user_id="main_data_agent", session_id=resolved_session_id, new_message=content
+        user_id="main_data_agent", session_id=run_session_id, new_message=content
     ):
       if event.is_final_response() and event.content and event.content.parts:
         raw_reply = event.content.parts[0].text
@@ -253,7 +238,7 @@ async def verify_ingestion_payload_a2a(
 
   verdict_str = decision.get("verdict", "REJECTED")
   reason_str = decision.get("reason", "Governance policy decision")
-  await persist_verdict_state(verdict_str, reason_str)
+  await persist_verdict_to_blackboard(verdict_str, reason_str)
 
   if verdict_str != "APPROVED":
     publish_to_dlq(payload, reason_str)

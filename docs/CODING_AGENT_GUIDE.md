@@ -98,19 +98,20 @@ All agent code lives in `/agent`. Built with `google-adk` (`google.adk`), `googl
   - Auth: Automatically attaches OIDC identity tokens using GCP Metadata Server (in Cloud Run / Agent Engine) or `gcloud auth print-identity-token` (in Cloud Shell).
   - Returns: Retrieved chunks with `nct_id`, `section_type`, `gcs_uri`, `chunk_text`, `cosine_similarity`.
   - Telemetry: Attaches `clinical.chunks_retrieved` and `clinical.latency_ms` to the ambient ADK span and emits structured Cloud Logging metrics.
-- `get_governance_verdict(nct_id: str, tool_context: Any = None) -> Dict[str, Any]`
-  - Checks `tool_context.state` first (`governance_verdict:{nct_id}` / `latest_governance_verdict`), then queries `FirestoreSessionService.get_session_state_sync(f"session-{nct_id}")`.
+- `get_governance_verdict(nct_id: str) -> Dict[str, Any]`
+  - Reads compliance verdicts and ingestion records directly from the Firestore Blackboard (`governance_verdicts/{nct_id}` and `ingest_records/{nct_id}`).
+- `record_ingest_event(...)` & `record_governance_verdict(...)`
+  - Explicit Blackboard write helpers used by `/v1/events/gcs-ingest` and `governance_agent.py` to log ingestion checkpoints and compliance verdicts keyed by `nct_id`.
 
 ### 3.3 `agent/governance_agent.py` - Agent-to-Agent (A2A) Governance & DLQ
 - **Agent Name**: `clinical_trials_governance_agent` (Model: `gemini-3.8-flash`)
 - **Tools**: `validate_document_schema`, `inspect_pii_and_sensitive_data`, `validate_file_integrity`.
 - **Callback**: `after_agent_callback=record_governance_verdict_callback`.
 - **Key Functions**:
-  - `verify_ingestion_payload_a2a(payload: Dict[str, Any], session_id: Optional[str] = None, session_service: Optional[BaseSessionService] = None) -> Dict[str, Any]`:
-    1. *Deterministic Session*: Resolves `session_id = session_id or f"session-{nct_id}"` using `get_session_service()` (`FirestoreSessionService`).
-    2. *Fast deterministic pre-checks*: validates `nct_id` regex (`^NCT\d{8}$`), `.pdf` extension, non-zero file size, and raw regex for SSN/PII.
-    3. *LLM validation*: Launches an ADK `Runner` with `FirestoreSessionService` to evaluate payload against Schema, File Integrity, and PII policies.
-    4. *Persistence & Output*: Persists structured verdict (`governance_verdict:{nct_id}`, `latest_governance_verdict`) into Firestore session state and returns `{"verdict": "APPROVED" | "REJECTED", "reason": "..."}`.
+  - `verify_ingestion_payload_a2a(payload: Dict[str, Any]) -> Dict[str, Any]`:
+    1. *Fast deterministic pre-checks*: validates `nct_id` regex (`^NCT\d{8}$`), `.pdf` extension, non-zero file size, and raw regex for SSN/PII.
+    2. *LLM validation*: Launches an ephemeral ADK `Runner` (`InMemorySessionService`) to evaluate payload against Schema, File Integrity, and PII policies.
+    3. *Blackboard Persistence & Output*: Persists structured verdict via `record_governance_verdict()` into Firestore `governance_verdicts/{nct_id}` (and updates `ingest_records/{nct_id}`) and returns `{"verdict": "APPROVED" | "REJECTED", "reason": "..."}`.
   - `publish_to_dlq(payload: Dict[str, Any], reason: str) -> Optional[str]`:
     - Publishes rejected events to Cloud Pub/Sub DLQ topic (`DLQ_TOPIC_ID`, default: `clinical-trials-ingest-dlq`).
     - Emits structured error log: `🚨 [GOVERNANCE AGENT INTERCEPTED -> DLQ]`.
@@ -126,12 +127,8 @@ All agent code lives in `/agent`. Built with `google-adk` (`google.adk`), `googl
   - De-identifies text replacing matches with `[INFO_TYPE]`. Returns `(sanitized_text, pii_detected_bool)`.
 - `VERTEX_SAFETY_SETTINGS`: Configures `types.SafetySetting` for `HATE_SPEECH`, `DANGEROUS_CONTENT`, `SEXUALLY_EXPLICIT`, `HARASSMENT` at `BLOCK_MEDIUM_AND_ABOVE`.
 
-### 3.6 `agent/memory.py` - Unified Firestore Session Service
-- `FirestoreSessionService(BaseSessionService)`:
-  - ADK-native persistent session provider backed by Cloud Firestore (`FIRESTORE_DATABASE`, `FIRESTORE_COLLECTION`), with automatic `InMemorySessionService` fallback for offline tests.
-  - Implements `create_session`, `get_session`, `append_event`, `list_sessions`, `delete_session`, `update_session_state`, and `get_session_state_sync`.
-- `get_session_service() -> FirestoreSessionService`: Singleton factory shared across ADK runners and tools.
-- `SessionMemory` class: Backwards-compatible facade over the same Firestore collection (`add_turn`, `get_turns`).
+### 3.6 `agent/memory.py` - Lightweight Business Turn Register
+- `SessionMemory` class: Lightweight Firestore helper (`FIRESTORE_DATABASE`, `FIRESTORE_COLLECTION`) retained for legacy turn logging (`add_turn`, `get_turns`) and business metrics. Conversational session state is managed natively by Agent Engine (`AdkApp` defaults), while inter-agent state uses the Firestore Blackboard in `agent/tools.py`.
 
 ### 3.7 `agent/telemetry.py` - FinOps & OpenTelemetry
 - Tracer: `_init_cloud_trace_provider_if_needed()` checks `GOOGLE_CLOUD_AGENT_ENGINE_ID` / `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` so Agent Engine's native OTLP exporter (`telemetry.googleapis.com`) is never clobbered.
@@ -166,7 +163,7 @@ All API and serving logic lives in `/pipeline`.
   - Emits telemetry and OpenTelemetry spans.
 - **`POST /v1/events/gcs-ingest`** (Eventarc Webhook):
   - Decodes incoming Pub/Sub push envelope or direct Eventarc CloudEvent.
-  - Derives deterministic `session_id = f"session-{nct_id}"` and executes A2A verification via `verify_ingestion_payload_a2a(event_payload, session_id=session_id)`. If rejected, routes to DLQ and returns 200/202.
+  - Logs ingestion metadata to the Firestore Blackboard (`ingest_records/{nct_id}`) via `record_ingest_event()`, then executes A2A verification via `verify_ingestion_payload_a2a(event_payload)` which writes the verdict to `governance_verdicts/{nct_id}`. If rejected, routes to DLQ and returns 200/202.
   - Fetches study metadata from ClinicalTrials.gov API v2 and performs an idempotent BigQuery `MERGE` into `studies_metadata`.
   - Executes incremental extraction and embedding queries via `pipeline/queries.py`.
 - **`POST /v1/chat`** (Agent Runtime Proxy):

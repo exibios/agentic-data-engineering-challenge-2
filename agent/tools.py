@@ -1,4 +1,5 @@
 # agent/tools.py
+from datetime import datetime, timezone
 import logging
 import subprocess
 from typing import Any, Dict, List
@@ -8,7 +9,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import id_token
 import httpx
 
-from agent.clients import get_bq_client
+from agent.clients import get_bq_client, get_firestore_client
 from agent.config import settings
 from agent.telemetry import get_active_conversation_id, log_agent_session_metrics
 from opentelemetry import trace
@@ -252,65 +253,115 @@ def search_clinical_protocols(
     return {"status": "error", "error_message": str(e)}
 
 
-def get_governance_verdict(
+BLACKBOARD_VERDICTS_COLLECTION = "governance_verdicts"
+BLACKBOARD_INGEST_COLLECTION = "ingest_records"
+BLACKBOARD_TIMEOUT = 5.0
+
+
+def record_ingest_event(
     nct_id: str,
-    tool_context: Any = None,
+    gcs_uri: str,
+    size_bytes: int,
+    status: str = "PENDING_GOVERNANCE",
 ) -> dict[str, Any]:
-  """Retrieves the governance, schema, and PII verification verdict for a specific clinical trial (NCT ID).
-
-  Checks active session state and persistent Firestore session memory for prior evaluation records.
-  """
-  state_key = f"governance_verdict:{nct_id}"
-
-  # 1. Check local session state via injected ToolContext
-  if tool_context and hasattr(tool_context, "state") and tool_context.state:
-    if state_key in tool_context.state:
-      return {
-          "status": "found",
-          "source": "session_state",
-          "nct_id": nct_id,
-          "verdict": tool_context.state[state_key],
-      }
-    if "latest_governance_verdict" in tool_context.state:
-      latest = tool_context.state["latest_governance_verdict"]
-      if isinstance(latest, dict) and latest.get("nct_id") == nct_id:
-        return {
-            "status": "found",
-            "source": "session_state_latest",
-            "nct_id": nct_id,
-            "verdict": latest,
-        }
-
-  # 2. Check persistent Firestore session memory
+  """Writes a GCS ingestion checkpoint record to the Firestore Blackboard (`ingest_records/{nct_id}`)."""
+  record = {
+      "nct_id": nct_id,
+      "gcs_uri": gcs_uri,
+      "size_bytes": size_bytes,
+      "status": status,
+      "updated_at": datetime.now(timezone.utc).isoformat(),
+  }
   try:
-    from agent.memory import get_session_service
-
-    svc = get_session_service()
-    if hasattr(svc, "get_session_state_sync"):
-      state = svc.get_session_state_sync(f"session-{nct_id}")
-      if state and state_key in state:
-        return {
-            "status": "found",
-            "source": "firestore_session",
-            "nct_id": nct_id,
-            "verdict": state[state_key],
-        }
-      if state and "latest_governance_verdict" in state:
-        return {
-            "status": "found",
-            "source": "firestore_session_latest",
-            "nct_id": nct_id,
-            "verdict": state["latest_governance_verdict"],
-        }
+    db = get_firestore_client()
+    db.collection(BLACKBOARD_INGEST_COLLECTION).document(nct_id).set(
+        record, merge=True, timeout=BLACKBOARD_TIMEOUT
+    )
+    logger.info(
+        f"📋 [BLACKBOARD INGEST] Recorded '{nct_id}' ({status}) in {BLACKBOARD_INGEST_COLLECTION}/{nct_id}"
+    )
+    return {"status": "recorded", "record": record}
   except Exception as e:
-    logger.warning(f"Error checking Firestore session state for {nct_id}: {e}")
+    logger.warning(f"Failed writing ingest record for {nct_id} to Firestore Blackboard: {e}")
+    return {"status": "error", "error_message": str(e), "record": record}
+
+
+def record_governance_verdict(
+    nct_id: str,
+    verdict: str,
+    reason: str,
+    gcs_uri: str = "",
+    size_bytes: int = 0,
+) -> dict[str, Any]:
+  """Writes a governance compliance verdict to the Firestore Blackboard (`governance_verdicts/{nct_id}`)."""
+  verdict_record = {
+      "nct_id": nct_id,
+      "gcs_uri": gcs_uri,
+      "verdict": verdict,
+      "reason": reason,
+      "size_bytes": size_bytes,
+      "timestamp": datetime.now(timezone.utc).isoformat(),
+  }
+  try:
+    db = get_firestore_client()
+    db.collection(BLACKBOARD_VERDICTS_COLLECTION).document(nct_id).set(
+        verdict_record, merge=True, timeout=BLACKBOARD_TIMEOUT
+    )
+    ingest_status = "APPROVED" if verdict == "APPROVED" else "REJECTED_DLQ"
+    db.collection(BLACKBOARD_INGEST_COLLECTION).document(nct_id).set(
+        {
+            "nct_id": nct_id,
+            "status": ingest_status,
+            "verdict": verdict,
+            "updated_at": verdict_record["timestamp"],
+        },
+        merge=True,
+        timeout=BLACKBOARD_TIMEOUT,
+    )
+    logger.info(
+        f"📋 [BLACKBOARD VERDICT] Recorded '{nct_id}' -> {verdict} in {BLACKBOARD_VERDICTS_COLLECTION}/{nct_id}"
+    )
+    return {"status": "recorded", "verdict": verdict_record}
+  except Exception as e:
+    logger.warning(f"Failed writing governance verdict for {nct_id} to Firestore Blackboard: {e}")
+    return {"status": "error", "error_message": str(e), "verdict": verdict_record}
+
+
+def get_governance_verdict(nct_id: str) -> dict[str, Any]:
+  """Retrieves the governance, schema, and PII compliance verdict for a clinical trial (NCT ID) from the Firestore Blackboard."""
+  try:
+    db = get_firestore_client()
+    verdict_doc = (
+        db.collection(BLACKBOARD_VERDICTS_COLLECTION)
+        .document(nct_id)
+        .get(timeout=BLACKBOARD_TIMEOUT)
+    )
+    if verdict_doc.exists:
+      data = verdict_doc.to_dict() or {}
+      ingest_doc = (
+          db.collection(BLACKBOARD_INGEST_COLLECTION)
+          .document(nct_id)
+          .get(timeout=BLACKBOARD_TIMEOUT)
+      )
+      result: dict[str, Any] = {
+          "status": "found",
+          "source": f"firestore_blackboard/{BLACKBOARD_VERDICTS_COLLECTION}",
+          "nct_id": nct_id,
+          "verdict": data,
+      }
+      if ingest_doc.exists:
+        result["ingest_record"] = ingest_doc.to_dict()
+      return result
+  except Exception as e:
+    logger.warning(f"Error reading Firestore Blackboard for {nct_id}: {e}")
+    return {"status": "error", "nct_id": nct_id, "error_message": str(e)}
 
   return {
       "status": "not_found",
       "nct_id": nct_id,
       "message": (
-          f"No governance verification record found for {nct_id}. "
-          "The document may not have been ingested yet or was processed in an unlinked session."
+          f"No governance verification record found for {nct_id} in Firestore Blackboard "
+          f"({BLACKBOARD_VERDICTS_COLLECTION}/{nct_id})."
       ),
   }
 

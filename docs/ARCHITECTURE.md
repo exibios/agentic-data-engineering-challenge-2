@@ -35,10 +35,10 @@ flowchart TD
         VEC[("embedded_doc_chunks\n+ IVF Cosine Vector Index")]
     end
 
-    subgraph Serving["5. Hybrid Serving & Unified Session Layer"]
+    subgraph Serving["5. Hybrid Serving & Blackboard State Layer"]
         FASTAPI["FastAPI on Cloud Run\n(POST /search, GET /metadata, POST /v1/chat)"]
-        FS[("Cloud Firestore (FirestoreSessionService)\ndb: clinical-trials-agents-sessions-db\ncollection: agent_sessions")]
-        RUNTIME["Vertex AI Agent Engine (Agent Runtime)\n(ADK AdkApp: root_agent + callbacks + sub_agents)"]
+        FS[("Cloud Firestore Blackboard\ndb: clinical-trials-agents-sessions-db\ningest_records/{nct_id}\ngovernance_verdicts/{nct_id}")]
+        RUNTIME["Vertex AI Agent Engine (Agent Runtime)\n(ADK AdkApp: native sessions + root_agent + callbacks)"]
     end
 
     subgraph Telemetry["6. Observability & FinOps"]
@@ -49,9 +49,10 @@ flowchart TD
     %% Ingestion Flow
     CT_CDN -->|Download PDF| GCS
     GCS -->|Object Finalized| EV --> PS --> FASTAPI
-    FASTAPI -->|A2A Handshake: session-{nct_id}| GOV
+    FASTAPI -->|record_ingest_event| FS
+    FASTAPI -->|A2A Handshake| GOV
     GOV -->|Scan PII| DLP
-    GOV -->|Persist Verdict State| FS
+    GOV -->|record_governance_verdict| FS
     GOV -->|Reject Violation| DLQ
     GOV -->|Approve| CT_API
     CT_API -->|Resolve Metadata| META
@@ -96,11 +97,12 @@ sequenceDiagram
     EV->>API: POST /v1/events/gcs-ingest (Push envelope)
     
     rect rgb(240, 248, 255)
-        Note over API,Gov: Step 1: Agent-to-Agent (A2A) Verification & Session Persistence
-        API->>Gov: verify_ingestion_payload_a2a(payload, session_id="session-{nct_id}")
+        Note over API,Gov: Step 1: Firestore Blackboard Registration & A2A Verification
+        API->>API: record_ingest_event(nct_id, gcs_uri, "PENDING_GOVERNANCE")
+        API->>Gov: verify_ingestion_payload_a2a(payload)
         Gov->>Gov: Fast deterministic regex check (NCT\\d{8}, .pdf, size > 0)
         Gov->>DLP: Inspect sample text for PII/PHI
-        Gov->>Gov: Persist structured verdict to FirestoreSessionService
+        Gov->>Gov: record_governance_verdict(nct_id, verdict, reason)
         alt Policy Violation or Corrupted File
             Gov->>DLQ: publish_to_dlq(payload, rejection_reason)
             Gov-->>API: Verdict: REJECTED
@@ -151,7 +153,9 @@ The serving layer utilizes a dual-engine architecture:
   - `before_tool_callback`: `sql_safety_before_tool` enforces `SELECT`/`WITH` read-only SQL before tool execution.
   - `sub_agents`: `[governance_agent]` enables live A2A delegation from `root_agent`.
   - `generate_content_config`: Enforces `VERTEX_SAFETY_SETTINGS`.
-- **Unified Memory & Sessions**: `FirestoreSessionService` (`agent/memory.py`) persists ADK `Session` state, events, and turn history in Cloud Firestore (`clinical-trials-agents-sessions-db` / `agent_sessions`).
+- **Hybrid Blackboard Memory & Sessions (Pattern A)**:
+  - **Conversational History**: Managed natively by Vertex AI Agent Engine (`AdkApp` defaults), ensuring full Cloud Console Playground compatibility.
+  - **Business & Governance State**: Persisted in Cloud Firestore (`clinical-trials-agents-sessions-db`) across `ingest_records/{nct_id}` and `governance_verdicts/{nct_id}` collections.
 - **Dynamic Intent Routing**:
   - **Analytical Query**: Direct BigQuery SQL execution over `studies_metadata` via `execute_clinical_sql`.
   - **Conceptual Query**: Semantic retrieval over clinical protocols via `search_clinical_protocols` (calling Cloud Run `/search`).

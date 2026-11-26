@@ -31,7 +31,8 @@ Traditional ETL pipelines face three core failure modes when processing these do
 │ 4. Governance & Compliance     │ Inter-Agent (A2A) Sub-Agent + Callbacks │
 │ 5. Schema Evolution            │ Additive Nullable + Idempotent MERGE  │
 │ 6. Agent Hosting               │ Vertex AI Agent Engine (Agent Runtime)│
-│ 7. Session & Memory State      │ Unified FirestoreSessionService (ADK) │
+│ 7. Session & Memory State      │ Pattern A: Hybrid Blackboard (Native  │
+│                                │ AdkApp Sessions + Firestore Blackboard│
 └────────────────────────────────┴───────────────────────────────────────┘
 ```
 
@@ -91,14 +92,15 @@ Traditional ETL pipelines face three core failure modes when processing these do
   - Native integration with Google Cloud Trace via OpenTelemetry (`enable_tracing=True`). `agent/telemetry.py` detects `GOOGLE_CLOUD_AGENT_ENGINE_ID` / `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` and preserves Agent Engine's native OTLP exporter (`telemetry.googleapis.com`), attaching custom metrics directly to ambient ADK `execute_tool` spans so `gen_ai.conversation.id` is never broken.
   - Strict compliance and IAM boundary via `80080086039-compute@developer.gserviceaccount.com`.
 
-### 3.7 Decision 7: Unified Persistent Session State (`FirestoreSessionService`)
-- **Decision:** Replace ephemeral `InMemorySessionService` instances with a shared, ADK-native `FirestoreSessionService(BaseSessionService)` in `agent/memory.py`, backed by Cloud Firestore database `clinical-trials-agents-sessions-db` and collection `agent_sessions`, with a graceful in-memory fallback for offline unit tests.
-- **Deterministic Correlation & Inter-Agent Memory Sharing:**
-  - The GCS ingestion webhook (`POST /v1/events/gcs-ingest`) derives `session_id = f"session-{nct_id}"` and passes it to `verify_ingestion_payload_a2a`.
-  - The Governance Agent persists structured evaluation verdicts (`governance_verdict:{nct_id}`, `latest_governance_verdict`) into the shared Firestore session state.
-  - `root_agent` inspects persisted verdicts via the `get_governance_verdict` tool (`agent/tools.py`).
-  - Legacy `SessionMemory` (`add_turn`, `get_turns`) is preserved as a facade over the same Firestore document structure.
-- **Rationale:** Eliminates isolated/ephemeral A2A state and enables `root_agent` to answer compliance and audit questions about ingested clinical trials across independent runs.
+### 3.7 Decision 7: Pattern A — Hybrid Blackboard Architecture for Memory & State
+- **Decision:** Separate conversational chat state from inter-agent business/governance state using **Pattern A (Hybrid Blackboard Pattern)**:
+  1. **Conversational Chat History (Native Runtime)**: `AdkApp(agent=root_agent, enable_tracing=True)` uses Vertex AI Agent Engine's default managed session service (no custom `session_service_builder`), preserving full compatibility with the Cloud Console Playground UI and avoiding per-turn Firestore read/write overhead.
+  2. **Inter-Agent & Governance State (Firestore Blackboard)**: Cloud Firestore (`clinical-trials-agents-sessions-db`) acts strictly as a persistent transaction register across two collections keyed by `nct_id`:
+     - `ingest_records/{nct_id}`: Written by `POST /v1/events/gcs-ingest` via `record_ingest_event()` when a PDF lands in GCS.
+     - `governance_verdicts/{nct_id}`: Written by `clinical_trials_governance_agent` via `record_governance_verdict()` after schema/integrity/PII checks.
+     - `get_governance_verdict(nct_id)` (`agent/tools.py`): Reads directly from `governance_verdicts/{nct_id}` (and `ingest_records/{nct_id}`) so `root_agent` can inspect ingestion compliance across independent runs.
+  3. **Legacy Turn & Metric Compatibility**: `agent/memory.py` retains a lightweight `SessionMemory` class for business/turn logging (`agent_sessions`).
+- **Rationale:** Combines zero-config native Agent Engine Playground sessions with durable, low-cost, queryable inter-agent state in Firestore.
 
 ---
 

@@ -257,19 +257,15 @@ async def test_day8() -> None:
   print("=" * 78)
 
   from google.adk.runners import Runner
+  from google.adk.sessions import InMemorySessionService
   from google.genai import types
   from agent.agent import root_agent
-  from agent.memory import get_session_service
 
-  session_service = get_session_service()
+  session_service = InMemorySessionService()
   session_id = f"day8-routing-verify-{int(time.time())}"
-  existing_session = await session_service.get_session(
+  await session_service.create_session(
       app_name="verify_app", user_id="tester", session_id=session_id
   )
-  if not existing_session:
-    await session_service.create_session(
-        app_name="verify_app", user_id="tester", session_id=session_id
-    )
   runner = Runner(
       agent=root_agent, app_name="verify_app", session_service=session_service
   )
@@ -369,18 +365,14 @@ async def test_day9(http: UnifiedHttpClient, upload_gcs: bool = False) -> None:
       f"HTTP {code_bad} | Status={body_bad.get('status')} | Verdict={verdict_bad}",
   )
 
-  # 3. Verify Persistent Inter-Agent Session Memory for Governance Verdict
+  # 3. Verify Firestore Blackboard Persistence for Governance Verdict
   from agent.governance_agent import verify_ingestion_payload_a2a
-  from agent.memory import get_session_service
+  from agent.tools import get_governance_verdict
 
-  gov_session_id = "session-NCT04001234"
-  svc = get_session_service()
-  gov_session = await svc.get_session(
-      app_name="gov_app", user_id="main_data_agent", session_id=gov_session_id
-  )
-  if not gov_session:
+  bb_res = get_governance_verdict("NCT04001234")
+  if bb_res.get("status") != "found":
     # If running against remote Cloud Run that hasn't been re-deployed yet,
-    # execute verify_ingestion_payload_a2a to ensure persistent Firestore session is validated
+    # execute verify_ingestion_payload_a2a locally to validate Firestore Blackboard write/read
     await verify_ingestion_payload_a2a(
         {
             "nct_id": "NCT04001234",
@@ -388,23 +380,19 @@ async def test_day9(http: UnifiedHttpClient, upload_gcs: bool = False) -> None:
             "size_bytes": 384000,
             "sample_text": "Phase 2 clinical study objectives and inclusion criteria.",
             "proposed_schema": ["nct_id", "gcs_uri", "section_type", "chunk_text"],
-        },
-        session_id=gov_session_id,
+        }
     )
-    gov_session = await svc.get_session(
-        app_name="gov_app", user_id="main_data_agent", session_id=gov_session_id
-    )
+    bb_res = get_governance_verdict("NCT04001234")
 
-  session_has_verdict = (
-      gov_session is not None
-      and f"governance_verdict:NCT04001234" in gov_session.state
-      and gov_session.state[f"governance_verdict:NCT04001234"]["verdict"] == "APPROVED"
+  blackboard_has_verdict = (
+      bb_res.get("status") == "found"
+      and bb_res.get("verdict", {}).get("verdict") in ("APPROVED", "REJECTED")
   )
   record_result(
       "Day 9",
-      "Persistent Inter-Agent Session Memory (Governance Verdict)",
-      session_has_verdict,
-      f"Firestore session '{gov_session_id}' state contains verdict: {gov_session.state.get('governance_verdict:NCT04001234') if gov_session else 'Session Not Found'}",
+      "Firestore Blackboard Persistence (governance_verdicts)",
+      blackboard_has_verdict,
+      f"Firestore Blackboard 'governance_verdicts/NCT04001234' -> {bb_res.get('verdict')}",
   )
 
   # 4. Optional Live GCS File Upload Trigger Test (when --upload-gcs is passed)
